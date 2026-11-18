@@ -160,6 +160,7 @@ isr_common_stub:
 
     mov rdi, rsp
     call rust_interrupt_dispatch
+    mov rsp, rax
 
     pop rax
     pop rbx
@@ -250,8 +251,12 @@ fn exception_name(vector: u64) -> &'static str {
 }
 
 /// Central Ring-0 interrupt & CPU exception dispatcher invoked by `isr_common_stub`.
+/// Returns the `InterruptFrame` stack pointer (`RSP`) of the thread to resume.
 #[no_mangle]
-pub extern "sysv64" fn rust_interrupt_dispatch(frame: &mut InterruptFrame) {
+pub extern "sysv64" fn rust_interrupt_dispatch(
+    frame_ptr: *mut InterruptFrame,
+) -> *mut InterruptFrame {
+    let frame = unsafe { &mut *frame_ptr };
     match frame.vector {
         3 => {
             BREAKPOINT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -260,15 +265,22 @@ pub extern "sysv64" fn rust_interrupt_dispatch(frame: &mut InterruptFrame) {
                 frame.rip,
                 frame.cs
             );
+            frame_ptr
         }
         32 => {
             crate::interrupts::on_timer_tick();
+            crate::scheduler::schedule_on_tick(frame_ptr)
         }
         255 => {
             // APIC Spurious Interrupt: per Intel SDM, do NOT send EOI.
+            frame_ptr
         }
         254 => {
-            kprintln!("[CELEBRON-IDT] Unhandled interrupt vector received (RIP=0x{:016X})", frame.rip);
+            kprintln!(
+                "[CELEBRON-IDT] Unhandled interrupt vector received (RIP=0x{:016X})",
+                frame.rip
+            );
+            frame_ptr
         }
         vec if vec < 32 => {
             let cr2: u64;
@@ -316,6 +328,7 @@ pub extern "sysv64" fn rust_interrupt_dispatch(frame: &mut InterruptFrame) {
         }
         other => {
             kprintln!("[CELEBRON-IDT] Unexpected vector {}", other);
+            frame_ptr
         }
     }
 }

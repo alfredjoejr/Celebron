@@ -78,9 +78,9 @@ Run Automated Kernel Self-Tests & Inspect Serial Logs
 - [x] Verify clean interrupt handling (`#BP` `int3` trap) and live timer ticks.
 
 ### Milestone 1.4 — Multitasking & Scheduling
-- [ ] Implement kernel threads and context switching.
-- [ ] Build preemptive round-robin / priority scheduler.
-- [ ] Add SMP (multi-core CPU) bring-up support.
+- [x] Implement kernel threads and context switching.
+- [x] Build preemptive round-robin / priority scheduler.
+- [x] Add SMP (multi-core CPU) bring-up & ACPI MADT topology support.
 
 ### Milestone 1.5 — Userspace, Capabilities & IPC
 - [ ] Implement `syscall`/`sysret` transition to Ring 3 (userspace).

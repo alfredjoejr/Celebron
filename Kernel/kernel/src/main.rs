@@ -9,7 +9,9 @@ mod heap;
 mod idt;
 mod interrupts;
 mod pmm;
+mod scheduler;
 mod serial;
+mod smp;
 mod vmm;
 
 use alloc::boxed::Box;
@@ -22,10 +24,18 @@ use font::{pack_rgb, FramebufferCanvas};
 use heap::HeapStats;
 use interrupts::ApicInfo;
 use pmm::PmmStats;
+use scheduler::SchedulerStats;
+use smp::SmpInfo;
 use vmm::VirtualMemoryManager;
 
+struct DashboardLiveCoords {
+    tick_x: usize,
+    tick_y: usize,
+    sched_x: usize,
+    sched_y: usize,
+}
+
 /// Render the Celebron OS Ring-0 Pure Microkernel visual boot dashboard onto the UEFI GOP framebuffer.
-/// Returns the `(x, y)` coordinates of the live tick counter if a framebuffer is active.
 fn render_boot_dashboard(
     boot_info: &BootInfo,
     pmm_stats: &PmmStats,
@@ -33,8 +43,10 @@ fn render_boot_dashboard(
     heap_stats: &HeapStats,
     alloc_test_addr: u64,
     apic_info: &ApicInfo,
+    smp_info: &SmpInfo,
+    sched_stats: &SchedulerStats,
     initial_ticks: u64,
-) -> Option<(usize, usize)> {
+) -> Option<DashboardLiveCoords> {
     if boot_info.has_framebuffer == 0 {
         return None;
     }
@@ -68,12 +80,12 @@ fn render_boot_dashboard(
     );
 
     // 3. Telemetry panel
-    let body_h = fb.height.saturating_sub(200).min(480);
-    canvas.fill_rect(40, 156, card_w, body_h, panel_bg);
-    canvas.fill_rect(40, 156, 8, body_h, status_green);
+    let body_h = fb.height.saturating_sub(180).min(560);
+    canvas.fill_rect(40, 152, card_w, body_h, panel_bg);
+    canvas.fill_rect(40, 152, 8, body_h, status_green);
 
-    let mut y = 182;
-    let line_step = 32;
+    let mut y = 174;
+    let line_step = 30;
 
     // Row 1: BootInfo ABI & Signature
     let mut x = canvas.draw_str(68, y, "[OK] UEFI BOOTLOADER: ABI V", status_green, 1);
@@ -122,22 +134,15 @@ fn render_boot_dashboard(
     canvas.draw_str(x, y, " -> BOOTINFO OK", text_white, 1);
     y += line_step;
 
-    // Row 6: Ring-0 Kernel Heap
+    // Row 6: Ring-0 Kernel Heap & Alloc Self-Test
     x = canvas.draw_str(68, y, "[OK] KERNEL HEAP: ", status_green, 1);
     x = canvas.draw_u64_dec(x, y, (heap_stats.total_bytes / 1024) as u64, text_white, 1);
     x = canvas.draw_str(x, y, " KIB @ ", text_white, 1);
-    x = canvas.draw_u64_hex(x, y, vmm::KERNEL_HEAP_VIRT_START, accent_cyan, 1);
-    x = canvas.draw_str(x, y, " (USED ", text_muted, 1);
-    x = canvas.draw_u64_dec(x, y, heap_stats.used_bytes as u64, text_white, 1);
-    canvas.draw_str(x, y, " B)", text_muted, 1);
+    x = canvas.draw_u64_hex(x, y, alloc_test_addr, accent_cyan, 1);
+    canvas.draw_str(x, y, " (BOX/VEC/STRING OK)", text_muted, 1);
     y += line_step;
 
-    // Row 7: Alloc self-test verification
-    x = canvas.draw_str(68, y, "[OK] ALLOC SELF-TEST: BOX/VEC(64)/STRING OK @ ", status_green, 1);
-    canvas.draw_u64_hex(x, y, alloc_test_addr, accent_cyan, 1);
-    y += line_step;
-
-    // Row 8: GDT / TSS / IDT verification
+    // Row 7: GDT / TSS / IDT verification
     canvas.draw_str(
         68,
         y,
@@ -145,6 +150,15 @@ fn render_boot_dashboard(
         status_green,
         1,
     );
+    y += line_step;
+
+    // Row 8: ACPI MADT SMP Topology & I/O APIC
+    x = canvas.draw_str(68, y, "[OK] ACPI MADT SMP: ", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, smp_info.detected_cores as u64, text_white, 1);
+    x = canvas.draw_str(x, y, " CPU CORE(S) (BSP APIC ", text_white, 1);
+    x = canvas.draw_u64_dec(x, y, smp_info.bsp_apic_id as u64, accent_cyan, 1);
+    x = canvas.draw_str(x, y, ") | IOAPIC: ", text_muted, 1);
+    canvas.draw_u64_hex(x, y, smp_info.ioapic_phys_addr, accent_cyan, 1);
     y += line_step;
 
     // Row 9: Local APIC Timer & Live Ticks
@@ -158,22 +172,41 @@ fn render_boot_dashboard(
     let tick_x = canvas.draw_str(x, y, " ONLINE | LIVE TICKS: ", text_muted, 1);
     let tick_y = y;
     canvas.draw_u64_dec(tick_x, tick_y, initial_ticks, accent_cyan, 1);
+    y += line_step;
+
+    // Row 10: Preemptive Priority/Round-Robin Scheduler
+    x = canvas.draw_str(68, y, "[OK] PREEMPTIVE SCHED: ", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, sched_stats.active_threads as u64, text_white, 1);
+    let sched_x = canvas.draw_str(x, y, " THREADS | CTX SW: ", text_muted, 1);
+    let sched_y = y;
+    let coords = DashboardLiveCoords {
+        tick_x,
+        tick_y,
+        sched_x,
+        sched_y,
+    };
+    render_live_scheduler_counters(boot_info, &coords, initial_ticks, sched_stats);
     y += line_step + 16;
 
-    // Row 10: Active milestone status
+    // Row 11: Active milestone status
     canvas.draw_str(
         68,
         y,
-        "STATUS: MILESTONE 1.3 ONLINE - GDT, TSS, IDT & APIC TIMER ACTIVE",
+        "STATUS: MILESTONE 1.4 ONLINE - SMP & PREEMPTIVE MULTITASKING ACTIVE",
         accent_cyan,
         1,
     );
 
-    Some((tick_x, tick_y))
+    Some(coords)
 }
 
-/// Update only the numeric tick counter on the GOP dashboard without full-screen flicker.
-fn render_live_tick_counter(boot_info: &BootInfo, tick_x: usize, tick_y: usize, ticks: u64) {
+/// Update only the live timer tick & preemptive scheduler counters without full-screen flicker.
+fn render_live_scheduler_counters(
+    boot_info: &BootInfo,
+    coords: &DashboardLiveCoords,
+    ticks: u64,
+    sched_stats: &SchedulerStats,
+) {
     if boot_info.has_framebuffer == 0 {
         return;
     }
@@ -181,9 +214,40 @@ fn render_live_tick_counter(boot_info: &BootInfo, tick_x: usize, tick_y: usize, 
     let canvas = FramebufferCanvas::new(fb);
     let panel_bg = pack_rgb(0x13, 0x1C, 0x2E, fb.format);
     let accent_cyan = pack_rgb(0x00, 0xD4, 0xFF, fb.format);
+    let text_white = pack_rgb(0xF1, 0xF5, 0xF9, fb.format);
+    let text_muted = pack_rgb(0x94, 0xA3, 0xB8, fb.format);
 
-    canvas.fill_rect(tick_x, tick_y, 200, 18, panel_bg);
-    canvas.draw_u64_dec(tick_x, tick_y, ticks, accent_cyan, 1);
+    // 1. Update live timer ticks
+    canvas.fill_rect(coords.tick_x, coords.tick_y, 220, 18, panel_bg);
+    canvas.draw_u64_dec(coords.tick_x, coords.tick_y, ticks, accent_cyan, 1);
+
+    // 2. Update preemptive context switches & worker thread operations
+    let clear_w = fb.width.saturating_sub(coords.sched_x + 48);
+    canvas.fill_rect(coords.sched_x, coords.sched_y, clear_w, 18, panel_bg);
+    let mut x = canvas.draw_u64_dec(
+        coords.sched_x,
+        coords.sched_y,
+        sched_stats.context_switches,
+        accent_cyan,
+        1,
+    );
+    x = canvas.draw_str(x, coords.sched_y, " (W1: ", text_muted, 1);
+    x = canvas.draw_u64_dec(
+        x,
+        coords.sched_y,
+        sched_stats.worker_telemetry_ops,
+        text_white,
+        1,
+    );
+    x = canvas.draw_str(x, coords.sched_y, ", W2: ", text_muted, 1);
+    x = canvas.draw_u64_dec(
+        x,
+        coords.sched_y,
+        sched_stats.worker_cognitive_ops,
+        text_white,
+        1,
+    );
+    canvas.draw_str(x, coords.sched_y, ")", text_muted, 1);
 }
 
 /// Celebron OS Pure Microkernel Ring-0 Entry Point (`kernel_main`).
@@ -357,15 +421,36 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         bp_count
     );
 
-    // 8. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
+    // 8. Discover SMP Processor Topology & I/O APIC via ACPI MADT
+    let smp_info = smp::init(boot_info.acpi_rsdp_address);
+    kprintln!(
+        "[CELEBRON-SMP] ACPI MADT verified={}: {} logical CPU core(s), BSP APIC ID={}, IOAPIC=0x{:08X}",
+        smp_info.madt_verified,
+        smp_info.detected_cores,
+        smp_info.bsp_apic_id,
+        smp_info.ioapic_phys_addr
+    );
+
+    // 9. Initialize Preemptive Priority/Round-Robin Scheduler & spawn background Ring-0 worker threads
+    scheduler::init_and_spawn_workers();
+
+    // 10. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
     let apic_info = interrupts::init_apic_and_timer();
     let initial_ticks = interrupts::enable_interrupts_and_verify_timer();
+    let initial_sched_stats = scheduler::stats();
     kprintln!(
         "[CELEBRON-APIC] {} Timer Online (base=0x{:016X}, vec={}, initial_ticks={})",
         if apic_info.is_x2apic { "x2APIC" } else { "xAPIC" },
         apic_info.base_addr,
         interrupts::TIMER_INTERRUPT_VECTOR,
         initial_ticks
+    );
+    kprintln!(
+        "[CELEBRON-SCHED] Preemptive Multitasking Active: {} threads, {} context switches (w1={}, w2={})",
+        initial_sched_stats.active_threads,
+        initial_sched_stats.context_switches,
+        initial_sched_stats.worker_telemetry_ops,
+        initial_sched_stats.worker_cognitive_ops
     );
 
     let pmm_final_stats = pmm.stats();
@@ -374,23 +459,26 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         pmm_final_stats.used_frames,
         pmm_final_stats.free_frames
     );
-    let tick_coords = render_boot_dashboard(
+    let live_coords = render_boot_dashboard(
         boot_info,
         &pmm_final_stats,
         &vmm,
         &heap_stats_live,
         alloc_test_addr,
         &apic_info,
+        &smp_info,
+        &initial_sched_stats,
         initial_ticks,
     );
-    kprintln!("[CELEBRON-KERNEL] Milestone 1.3 Online (GDT, TSS, IDT & Local APIC Timer Active).");
+    kprintln!("[CELEBRON-KERNEL] Milestone 1.4 Online (SMP & Preemptive Multitasking Active).");
 
     let mut last_rendered_ticks = initial_ticks;
     loop {
         let now_ticks = interrupts::timer_ticks();
-        if now_ticks.saturating_sub(last_rendered_ticks) >= 10 {
-            if let Some((tx, ty)) = tick_coords {
-                render_live_tick_counter(boot_info, tx, ty, now_ticks);
+        if now_ticks.saturating_sub(last_rendered_ticks) >= 6 {
+            let now_sched = scheduler::stats();
+            if let Some(ref coords) = live_coords {
+                render_live_scheduler_counters(boot_info, coords, now_ticks, &now_sched);
             }
             last_rendered_ticks = now_ticks;
         }
