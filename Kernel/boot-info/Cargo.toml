@@ -1,0 +1,6 @@
+[package]
+name = "celebron-boot-info"
+version = "0.1.0"
+edition = "2021"
+description = "Celebron OS proprietary Boot Hand-off Protocol between UEFI Bootloader and Microkernel"
+publish = false

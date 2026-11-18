@@ -1,0 +1,15 @@
+# Rust / Cargo build artifacts
+**/target/
+
+# Generated EFI staging outputs
+Kernel/build/
+
+# Generated virtual machine disk images (rebuilt via VM/build-vm-image.ps1)
+VM/*.img
+VM/*.vhd
+VM/*.vhdx
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp

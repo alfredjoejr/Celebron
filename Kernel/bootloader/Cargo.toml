@@ -1,0 +1,13 @@
+[package]
+name = "celebron-bootloader"
+version = "0.1.0"
+edition = "2021"
+description = "Celebron OS Proprietary UEFI Bootloader (x86_64-unknown-uefi)"
+publish = false
+
+[[bin]]
+name = "celebron-bootloader"
+path = "src/main.rs"
+
+[dependencies]
+celebron-boot-info = { path = "../boot-info" }

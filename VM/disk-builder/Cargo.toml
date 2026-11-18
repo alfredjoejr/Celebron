@@ -1,0 +1,6 @@
+[package]
+name = "celebron-disk-builder"
+version = "0.1.0"
+edition = "2021"
+description = "Celebron OS Proprietary GPT + FAT32 + VHD/VHDX Virtual Disk Image Builder"
+publish = false

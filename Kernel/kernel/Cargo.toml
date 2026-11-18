@@ -1,0 +1,13 @@
+[package]
+name = "celebron-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Celebron OS Proprietary Pure Microkernel (x86_64-unknown-none)"
+publish = false
+
+[[bin]]
+name = "celebron-kernel"
+path = "src/main.rs"
+
+[dependencies]
+celebron-boot-info = { path = "../boot-info" }
