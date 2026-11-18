@@ -68,19 +68,19 @@ Run Automated Kernel Self-Tests & Inspect Serial Logs
 - [x] Implement kernel panic handler.
 
 ### Milestone 1.2 — Memory Management
-- [ ] Parse UEFI memory map and build the Physical Memory Manager (PMM).
-- [ ] Set up higher-half kernel paging and Virtual Memory Manager (VMM).
-- [ ] Implement kernel heap allocator (`alloc` support).
+- [x] Parse UEFI memory map and build the Physical Memory Manager (PMM).
+- [x] Set up higher-half kernel paging and Virtual Memory Manager (VMM).
+- [x] Implement kernel heap allocator (`alloc` support).
 
 ### Milestone 1.3 — Interrupts & Timing
-- [ ] Configure GDT, TSS, and IDT (CPU exceptions + double-fault stack).
-- [ ] Initialize Local APIC, IOAPIC, and hardware timer (HPET / APIC timer).
-- [ ] Verify clean interrupt handling and timer ticks.
+- [x] Configure GDT, TSS, and IDT (CPU exceptions + double-fault stack).
+- [x] Initialize Local APIC, 8259 PIC masking, and hardware timer (periodic APIC timer).
+- [x] Verify clean interrupt handling (`#BP` `int3` trap) and live timer ticks.
 
 ### Milestone 1.4 — Multitasking & Scheduling
-- [ ] Implement kernel threads and context switching.
-- [ ] Build preemptive round-robin / priority scheduler.
-- [ ] Add SMP (multi-core CPU) bring-up support.
+- [x] Implement kernel threads and context switching.
+- [x] Build preemptive round-robin / priority scheduler.
+- [x] Add SMP (multi-core CPU) bring-up & ACPI MADT topology support.
 
 ### Milestone 1.5 — Userspace, Capabilities & IPC
 - [ ] Implement `syscall`/`sysret` transition to Ring 3 (userspace).
