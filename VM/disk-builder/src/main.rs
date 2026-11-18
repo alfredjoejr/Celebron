@@ -489,11 +489,11 @@ fn build_vhdx_image(raw_disk: &[u8]) -> Vec<u8> {
         8,
         6,
     );
-    // 3. Virtual Disk ID: BECAA12E-B2E9-450F-93EF-C309E000C746 (flags = IsVirtualDisk | IsRequired [6])
+    // 3. Virtual Disk ID (Page 83 Data): BECA12AB-B2E6-4523-93EF-C309E000C746 (flags = IsVirtualDisk | IsRequired [6])
     write_meta_entry(
         &mut vhdx[meta_base..meta_base + MB],
         2,
-        [0x2E, 0xA1, 0xCA, 0xBE, 0xE9, 0xB2, 0x0F, 0x45, 0x93, 0xEF, 0xC3, 0x09, 0xE0, 0x00, 0xC7, 0x46],
+        [0xAB, 0x12, 0xCA, 0xBE, 0xE6, 0xB2, 0x23, 0x45, 0x93, 0xEF, 0xC3, 0x09, 0xE0, 0x00, 0xC7, 0x46],
         0x10010,
         16,
         6,
@@ -590,4 +590,78 @@ fn main() {
     let vhdx_path = out_dir.join("CelebronOS.vhdx");
     fs::write(&vhdx_path, &vhdx_disk).expect("Failed to write CelebronOS.vhdx");
     println!("  -> Created Hyper-V VHDX:     {}", vhdx_path.display());
+
+    verify_with_virtdisk(&vhdx_path, 3); // 3 = VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
+    verify_with_virtdisk(&vhd_path, 2);  // 2 = VIRTUAL_STORAGE_TYPE_DEVICE_VHD
+}
+
+#[repr(C)]
+struct VirtualStorageType {
+    device_id: u32,
+    vendor_id: [u8; 16],
+}
+
+#[link(name = "virtdisk")]
+extern "system" {
+    fn OpenVirtualDisk(
+        virtual_storage_type: *const VirtualStorageType,
+        path: *const u16,
+        virtual_disk_access_mask: u32,
+        flags: u32,
+        parameters: *const core::ffi::c_void,
+        handle: *mut isize,
+    ) -> u32;
+
+    fn GetVirtualDiskInformation(
+        virtual_disk_handle: isize,
+        virtual_disk_info_size: *mut u32,
+        virtual_disk_info: *mut u8,
+        size_used: *mut u32,
+    ) -> u32;
+
+    fn CloseHandle(handle: isize) -> i32;
+}
+
+fn verify_with_virtdisk(path: &std::path::Path, device_id: u32) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // MICROSOFT_VENDOR_GUID: EC984AEC-A0F9-47e9-901F-71415A66345B
+    let vst = VirtualStorageType {
+        device_id,
+        vendor_id: [
+            0xEC, 0x4A, 0x98, 0xEC, 0xF9, 0xA0, 0xE9, 0x47,
+            0x90, 0x1F, 0x71, 0x41, 0x5A, 0x66, 0x34, 0x5B,
+        ],
+    };
+    let mut handle: isize = 0;
+    // VIRTUAL_DISK_ACCESS_GET_INFO = 0x00080000
+    let status = unsafe {
+        OpenVirtualDisk(
+            &vst,
+            wide_path.as_ptr(),
+            0x0008_0000,
+            0,
+            std::ptr::null(),
+            &mut handle,
+        )
+    };
+    let mut info_buf = [0u8; 64];
+    info_buf[0..4].copy_from_slice(&1u32.to_le_bytes()); // Version = GET_VIRTUAL_DISK_INFO_SIZE (1)
+    let mut info_size = info_buf.len() as u32;
+    let mut size_used = 0u32;
+    let info_status = if status == 0 {
+        unsafe {
+            let s = GetVirtualDiskInformation(handle, &mut info_size, info_buf.as_mut_ptr(), &mut size_used);
+            CloseHandle(handle);
+            s
+        }
+    } else {
+        status
+    };
+    println!(
+        "  [VirtDisk.dll Verification] {} -> Open={} GetInfo={} (0 = ERROR_SUCCESS)",
+        path.file_name().unwrap().to_string_lossy(),
+        status,
+        info_status
+    );
 }
