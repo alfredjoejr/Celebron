@@ -307,11 +307,17 @@ pub extern "efiapi" fn efi_main(
             uefi_print(con_out, "[1/5] Watchdog disabled & COM1 serial initialized (115200 8N1).\n");
         }
 
-        // 1. Discover ACPI RSDP
+        // 1. Discover ACPI RSDP & UEFI Runtime Services
         let rsdp_addr = find_acpi_rsdp(st);
+        let rt_addr = st.runtime_services as u64;
         BOOT_INFO.acpi_rsdp_address = rsdp_addr;
-        serial_println!("[CELEBRON-BOOT] ACPI RSDP physical address: 0x{:016X}", rsdp_addr);
-        uefi_print(con_out, "[2/5] ACPI RSDP table discovered.\n");
+        BOOT_INFO.uefi_runtime_services = rt_addr;
+        serial_println!(
+            "[CELEBRON-BOOT] ACPI RSDP: 0x{:016X} | UEFI Runtime Services: 0x{:016X}",
+            rsdp_addr,
+            rt_addr
+        );
+        uefi_print(con_out, "[2/5] ACPI RSDP & UEFI Runtime Services discovered.\n");
 
         // 2. Discover & initialize UEFI GOP Framebuffer
         if let Some(fb) = init_gop_framebuffer(bs) {

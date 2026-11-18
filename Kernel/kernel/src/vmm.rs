@@ -4,7 +4,7 @@
 //! and atomically switches CR3 to Celebron's own page tables.
 
 use crate::pmm::PhysicalMemoryManager;
-use celebron_boot_info::BootInfo;
+use celebron_boot_info::{BootInfo, MemoryRegionKind};
 use core::arch::asm;
 
 pub const PAGE_PRESENT: u64 = 1 << 0;
@@ -180,6 +180,27 @@ impl VirtualMemoryManager {
                     let mut addr = fb_start;
                     while addr < fb_end {
                         vmm.map_2m(addr, addr, PAGE_WRITABLE | PAGE_WRITE_THROUGH, pmm);
+                        addr += HUGE_2M_SIZE;
+                    }
+                }
+            }
+
+            // 2b. If any UEFI Runtime Services or ACPI tables reside above 4 GiB, identity-map them.
+            for i in 0..boot_info.memory_region_count {
+                let region = &boot_info.memory_regions[i];
+                if matches!(
+                    region.kind,
+                    MemoryRegionKind::FirmwareReserved | MemoryRegionKind::AcpiReclaimable
+                ) && region.physical_start.saturating_add(region.size_bytes) > four_gib
+                {
+                    let start = region.physical_start.max(four_gib) & !(HUGE_2M_SIZE - 1);
+                    let end = (region.physical_start.saturating_add(region.size_bytes)
+                        + HUGE_2M_SIZE
+                        - 1)
+                        & !(HUGE_2M_SIZE - 1);
+                    let mut addr = start;
+                    while addr < end {
+                        vmm.map_2m(addr, addr, PAGE_WRITABLE, pmm);
                         addr += HUGE_2M_SIZE;
                     }
                 }

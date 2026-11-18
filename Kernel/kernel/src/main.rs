@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod capability;
 mod font;
 mod gdt;
@@ -10,7 +11,9 @@ mod heap;
 mod idt;
 mod interrupts;
 mod ipc;
+mod pcie;
 mod pmm;
+mod power;
 mod scheduler;
 mod serial;
 mod smp;
@@ -18,6 +21,7 @@ mod syscall;
 mod userspace;
 mod vmm;
 
+use acpi::AcpiInfo;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,7 +31,9 @@ use core::panic::PanicInfo;
 use font::{pack_rgb, FramebufferCanvas};
 use heap::HeapStats;
 use interrupts::ApicInfo;
+use pcie::{PcieEnumerationResult, StorageKind};
 use pmm::PmmStats;
+use power::{PowerAction, PowerCapabilities};
 use scheduler::SchedulerStats;
 use smp::SmpInfo;
 use vmm::VirtualMemoryManager;
@@ -37,6 +43,7 @@ struct DashboardLiveCoords {
     tick_y: usize,
     sched_x: usize,
     sched_y: usize,
+    status_y: usize,
 }
 
 /// Render the Celebron OS Ring-0 Pure Microkernel visual boot dashboard onto the UEFI GOP framebuffer.
@@ -51,6 +58,9 @@ fn render_boot_dashboard(
     sched_stats: &SchedulerStats,
     syscall_stats: &syscall::SyscallStats,
     user_info: &userspace::UserspaceInfo,
+    acpi_info: &AcpiInfo,
+    pcie_info: &PcieEnumerationResult,
+    power_caps: &PowerCapabilities,
     initial_ticks: u64,
 ) -> Option<DashboardLiveCoords> {
     if boot_info.has_framebuffer == 0 {
@@ -86,12 +96,12 @@ fn render_boot_dashboard(
     );
 
     // 3. Telemetry panel
-    let body_h = fb.height.saturating_sub(180).min(560);
+    let body_h = fb.height.saturating_sub(172).min(576);
     canvas.fill_rect(40, 152, card_w, body_h, panel_bg);
     canvas.fill_rect(40, 152, 8, body_h, status_green);
 
-    let mut y = 174;
-    let line_step = 28;
+    let mut y = 168;
+    let line_step = 26;
 
     // Row 1: BootInfo ABI & Signature
     let mut x = canvas.draw_str(68, y, "[OK] UEFI BOOTLOADER: ABI V", status_green, 1);
@@ -185,11 +195,12 @@ fn render_boot_dashboard(
     x = canvas.draw_u64_dec(x, y, sched_stats.active_threads as u64, text_white, 1);
     let sched_x = canvas.draw_str(x, y, " THREADS | CTX SW: ", text_muted, 1);
     let sched_y = y;
-    let coords = DashboardLiveCoords {
+    let mut coords = DashboardLiveCoords {
         tick_x,
         tick_y,
         sched_x,
         sched_y,
+        status_y: 0,
     };
     render_live_scheduler_counters(
         boot_info,
@@ -215,19 +226,66 @@ fn render_boot_dashboard(
     x = canvas.draw_u64_dec(x, y, user_info.tid as u64, text_white, 1);
     x = canvas.draw_str(x, y, " 'uinit-task' @ ", text_white, 1);
     x = canvas.draw_u64_hex(x, y, user_info.code_vaddr, accent_cyan, 1);
-    canvas.draw_str(x, y, " (16 KIB STACK) | SYSCALLS ACTIVE", text_muted, 1);
-    y += line_step + 14;
+    canvas.draw_str(x, y, " | SYSCALLS ACTIVE", text_muted, 1);
+    y += line_step;
 
-    // Row 13: Active milestone status
+    // Row 13: ACPI & PCIe Driver Foundation
+    x = canvas.draw_str(68, y, "[OK] ACPI/PCIE: ", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, acpi_info.tables_found as u64, text_white, 1);
+    x = canvas.draw_str(x, y, " TBL | HOST: ", text_muted, 1);
+    x = canvas.draw_str(x, y, pcie_info.hypervisor_vendor_str(), accent_cyan, 1);
+    x = canvas.draw_str(x, y, " | PCI DEV: ", text_muted, 1);
+    x = canvas.draw_u64_dec(x, y, pcie_info.device_count as u64, text_white, 1);
+    x = canvas.draw_str(x, y, " (STOR: ", text_muted, 1);
+    x = canvas.draw_u64_dec(x, y, pcie_info.storage_controllers as u64, accent_cyan, 1);
+    canvas.draw_str(x, y, ")", text_muted, 1);
+    y += line_step;
+
+    // Row 14: Power Control & Signal Interface
+    x = canvas.draw_str(68, y, "[OK] POWER CTRL: UEFI=", status_green, 1);
+    x = canvas.draw_str(
+        x,
+        y,
+        if power_caps.uefi_reset_available { "OK" } else { "NO" },
+        accent_cyan,
+        1,
+    );
+    x = canvas.draw_str(x, y, " ACPI-S5=", text_muted, 1);
+    x = canvas.draw_str(
+        x,
+        y,
+        if power_caps.acpi_s5_available { "OK" } else { "NO" },
+        accent_cyan,
+        1,
+    );
+    canvas.draw_str(x, y, " | SIGNAL: [S] SHUTDOWN [R] REBOOT [W] WARM", text_white, 1);
+    y += line_step + 12;
+
+    // Row 15: Active milestone status
+    coords.status_y = y;
     canvas.draw_str(
         68,
         y,
-        "STATUS: MILESTONE 1.5 ONLINE - RING-3 USERSPACE, CAPABILITIES & IPC ACTIVE",
+        "STATUS: MILESTONE 1.6 ONLINE - PHASE 1 COMPLETE (DRIVER & POWER FOUNDATION)",
         accent_cyan,
         1,
     );
 
     Some(coords)
+}
+
+/// Update the bottom status banner right before executing hardware shutdown or reboot.
+fn render_power_transition_banner(boot_info: &BootInfo, coords: &DashboardLiveCoords, msg: &str) {
+    if boot_info.has_framebuffer == 0 {
+        return;
+    }
+    let fb = boot_info.framebuffer;
+    let canvas = FramebufferCanvas::new(fb);
+    let panel_bg = pack_rgb(0x13, 0x1C, 0x2E, fb.format);
+    let warn_amber = pack_rgb(0xF5, 0x9E, 0x0B, fb.format);
+    let clear_w = fb.width.saturating_sub(116);
+    canvas.fill_rect(68, coords.status_y, clear_w, 20, panel_bg);
+    canvas.draw_str(68, coords.status_y, msg, warn_amber, 1);
 }
 
 /// Update only the live timer tick, preemptive scheduler, and userspace syscall counters.
@@ -484,14 +542,76 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     syscall::init();
     kprintln!("[CELEBRON-SYS] 64-bit syscall/sysret MSRs initialized (STAR, LSTAR, FMASK, swapgs)");
 
-    // 12. Initialize Ring-3 Userspace Task (TID 3 'uinit-task')
+    // 12. Parse ACPI Tables (FADT, MCFG, DSDT _S5_), initialize Power Management & enumerate PCIe bus
+    let acpi_info = acpi::init(boot_info.acpi_rsdp_address);
+    let power_caps = power::init(boot_info.uefi_runtime_services, acpi_info);
+    let pcie_info = pcie::enumerate(&acpi_info);
+    kprintln!(
+        "[CELEBRON-ACPI] {} tables | FADT={} MCFG={} S5={} HW-Reduced={} PM1a=0x{:X}",
+        acpi_info.tables_found,
+        acpi_info.fadt_found,
+        acpi_info.mcfg_found,
+        acpi_info.s5_found,
+        acpi_info.hw_reduced,
+        acpi_info.pm1a_cnt_blk
+    );
+    kprintln!(
+        "[CELEBRON-POWER] UEFI Reset={} | ACPI S5={} | ACPI Reset={} | HW-Reduced={}",
+        power_caps.uefi_reset_available,
+        power_caps.acpi_s5_available,
+        power_caps.acpi_reset_available,
+        power_caps.hw_reduced_acpi
+    );
+    kprintln!(
+        "[CELEBRON-PCIE] Host='{}' (Hyper-V={}) | ECAM={} | {} PCIe device(s), {} storage controller(s)",
+        pcie_info.hypervisor_vendor_str(),
+        pcie_info.is_hyperv,
+        pcie_info.used_ecam,
+        pcie_info.device_count,
+        pcie_info.storage_controllers
+    );
+
+    // Grant capability-gated MMIO / DMA / IRQ tokens for userspace storage drivers (Phase 2 bridge)
+    let dma_phys_frame = pmm
+        .alloc_frame()
+        .expect("Out of physical memory allocating userspace driver DMA frame");
+    let mut storage_mmio_base: u64 = 0;
+    let mut storage_irq: u8 = 0;
+    for i in 0..pcie_info.device_count {
+        let dev = &pcie_info.devices[i];
+        if dev.storage_kind != StorageKind::None {
+            storage_mmio_base = dev.bar0;
+            storage_irq = dev.irq_line;
+            kprintln!(
+                "[CELEBRON-DRV] Storage controller {:?} {:02X}:{:02X}.{} (VID=0x{:04X}, DID=0x{:04X}, BAR0=0x{:016X}, IRQ={})",
+                dev.storage_kind,
+                dev.bus,
+                dev.device,
+                dev.function,
+                dev.vendor_id,
+                dev.device_id,
+                dev.bar0,
+                dev.irq_line
+            );
+            break;
+        }
+    }
+    syscall::grant_driver_capabilities(storage_mmio_base, dma_phys_frame, storage_irq);
+    kprintln!(
+        "[CELEBRON-DRV] Granted userspace driver capabilities: MMIO=0x{:016X}, DMA=0x{:016X}, IRQ={}",
+        storage_mmio_base,
+        dma_phys_frame,
+        storage_irq
+    );
+
+    // 13. Initialize Ring-3 Userspace Task (TID 3 'uinit-task')
     let user_info = userspace::init(&mut pmm, &mut vmm);
     kprintln!(
         "[CELEBRON-USER] Ring-3 userspace initialized: TID {} 'uinit-task' mapped & scheduled",
         user_info.tid
     );
 
-    // 13. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
+    // 14. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
     let apic_info = interrupts::init_apic_and_timer();
     let initial_ticks = interrupts::enable_interrupts_and_verify_timer();
     let initial_sched_stats = scheduler::stats();
@@ -528,12 +648,50 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         &initial_sched_stats,
         &initial_syscall_stats,
         &user_info,
+        &acpi_info,
+        &pcie_info,
+        &power_caps,
         initial_ticks,
     );
-    kprintln!("[CELEBRON-KERNEL] Milestone 1.5 Online (Ring-3 Userspace, Capabilities & IPC Active).");
+    kprintln!("[CELEBRON-KERNEL] Milestone 1.6 Online (Phase 1 Complete — Driver & Power Foundation).");
+    kprintln!("[CELEBRON-POWER] Ready for signals: [S] Shutdown | [R] Cold Reboot | [W] Warm Reboot | SYS_POWER_CONTROL");
 
     let mut last_rendered_ticks = initial_ticks;
     loop {
+        match power::poll_power_signal() {
+            PowerAction::Shutdown => {
+                if let Some(ref coords) = live_coords {
+                    render_power_transition_banner(
+                        boot_info,
+                        coords,
+                        "POWER SIGNAL RECEIVED: EXECUTING CLEAN SYSTEM SHUTDOWN...",
+                    );
+                }
+                power::execute_shutdown();
+            }
+            PowerAction::RebootCold => {
+                if let Some(ref coords) = live_coords {
+                    render_power_transition_banner(
+                        boot_info,
+                        coords,
+                        "POWER SIGNAL RECEIVED: EXECUTING CLEAN COLD REBOOT...",
+                    );
+                }
+                power::execute_reboot(false);
+            }
+            PowerAction::RebootWarm => {
+                if let Some(ref coords) = live_coords {
+                    render_power_transition_banner(
+                        boot_info,
+                        coords,
+                        "POWER SIGNAL RECEIVED: EXECUTING CLEAN WARM REBOOT...",
+                    );
+                }
+                power::execute_reboot(true);
+            }
+            PowerAction::None => {}
+        }
+
         let now_ticks = interrupts::timer_ticks();
         if now_ticks.saturating_sub(last_rendered_ticks) >= 6 {
             let now_sched = scheduler::stats();

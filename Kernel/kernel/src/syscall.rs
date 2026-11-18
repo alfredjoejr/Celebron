@@ -4,12 +4,14 @@
 //! and dispatches userspace microkernel requests.
 
 use crate::capability::{
-    CapError, CapRights, CapType, Capability, CapabilityTable, CAP_IPC_ENDPOINT_INIT,
-    CAP_MEM_SHARED, CAP_SYS_CONSOLE, CAP_SYS_INFO,
+    CapError, CapRights, CapType, Capability, CapabilityTable, CAP_DRV_DMA, CAP_DRV_IRQ,
+    CAP_DRV_MMIO, CAP_IPC_ENDPOINT_INIT, CAP_MEM_SHARED, CAP_SYS_CONSOLE, CAP_SYS_INFO,
+    CAP_SYS_POWER,
 };
 use crate::gdt::KERNEL_CODE_SELECTOR;
 use crate::interrupts;
 use crate::ipc::{self, IpcError, IpcMessage};
+use crate::power::{self, PowerAction};
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +24,11 @@ pub const SYS_CAP_REVOKE: u64 = 5;
 pub const SYS_IPC_SEND: u64 = 6;
 pub const SYS_IPC_RECV: u64 = 7;
 pub const SYS_GET_TICKS: u64 = 9;
+pub const SYS_POWER_CONTROL: u64 = 10;
+pub const SYS_DRIVER_MMIO_READ: u64 = 11;
+pub const SYS_DRIVER_MMIO_WRITE: u64 = 12;
+pub const SYS_DRIVER_DMA_INFO: u64 = 13;
+pub const SYS_DRIVER_IRQ_ACK: u64 = 14;
 
 pub const RET_SUCCESS: u64 = 0;
 pub const ERR_INVALID_SYSCALL: u64 = 1;
@@ -298,7 +305,125 @@ pub extern "sysv64" fn rust_syscall_dispatch(
 
         SYS_GET_TICKS => interrupts::timer_ticks(),
 
+        SYS_POWER_CONTROL => {
+            let cap_handle = a1 as u32;
+            let action = match PowerAction::from_u64(a2) {
+                Some(act) => act,
+                None => return ERR_INVALID_ARG,
+            };
+            match table.verify(cap_handle, CapRights::WRITE) {
+                Ok(cap) => {
+                    if cap.cap_type != CapType::System || cap.object_id != 5 {
+                        return ERR_CAP_PERM_DENIED;
+                    }
+                    power::signal_power_action(action);
+                    RET_SUCCESS
+                }
+                Err(CapError::PermissionDenied) => ERR_CAP_PERM_DENIED,
+                Err(_) => ERR_CAP_INVALID,
+            }
+        }
+
+        SYS_DRIVER_MMIO_READ => {
+            let cap_handle = a1 as u32;
+            let offset = a2;
+            if offset >= 4096 || (offset & 0x3) != 0 {
+                return ERR_INVALID_ARG;
+            }
+            match table.verify(cap_handle, CapRights::READ) {
+                Ok(cap) => {
+                    if cap.cap_type != CapType::DeviceMmio || cap.object_id == 0 {
+                        return ERR_CAP_PERM_DENIED;
+                    }
+                    unsafe { core::ptr::read_volatile((cap.object_id + offset) as *const u32) as u64 }
+                }
+                Err(CapError::PermissionDenied) => ERR_CAP_PERM_DENIED,
+                Err(_) => ERR_CAP_INVALID,
+            }
+        }
+
+        SYS_DRIVER_MMIO_WRITE => {
+            let cap_handle = a1 as u32;
+            let offset = a2;
+            let val = a3 as u32;
+            if offset >= 4096 || (offset & 0x3) != 0 {
+                return ERR_INVALID_ARG;
+            }
+            match table.verify(cap_handle, CapRights::WRITE) {
+                Ok(cap) => {
+                    if cap.cap_type != CapType::DeviceMmio || cap.object_id == 0 {
+                        return ERR_CAP_PERM_DENIED;
+                    }
+                    unsafe {
+                        core::ptr::write_volatile((cap.object_id + offset) as *mut u32, val);
+                    }
+                    RET_SUCCESS
+                }
+                Err(CapError::PermissionDenied) => ERR_CAP_PERM_DENIED,
+                Err(_) => ERR_CAP_INVALID,
+            }
+        }
+
+        SYS_DRIVER_DMA_INFO => {
+            let cap_handle = a1 as u32;
+            match table.verify(cap_handle, CapRights::READ) {
+                Ok(cap) => {
+                    if cap.cap_type != CapType::DmaBuffer {
+                        return ERR_CAP_PERM_DENIED;
+                    }
+                    cap.object_id
+                }
+                Err(CapError::PermissionDenied) => ERR_CAP_PERM_DENIED,
+                Err(_) => ERR_CAP_INVALID,
+            }
+        }
+
+        SYS_DRIVER_IRQ_ACK => {
+            let cap_handle = a1 as u32;
+            match table.verify(cap_handle, CapRights::WRITE) {
+                Ok(cap) => {
+                    if cap.cap_type != CapType::Irq {
+                        return ERR_CAP_PERM_DENIED;
+                    }
+                    RET_SUCCESS
+                }
+                Err(CapError::PermissionDenied) => ERR_CAP_PERM_DENIED,
+                Err(_) => ERR_CAP_INVALID,
+            }
+        }
+
         _ => ERR_INVALID_SYSCALL,
+    }
+}
+
+/// Grant capability-gated MMIO, DMA, and IRQ handles to userspace driver tasks.
+pub fn grant_driver_capabilities(mmio_base: u64, dma_phys_addr: u64, irq_line: u8) {
+    unsafe {
+        let table = &mut *addr_of_mut!(ACTIVE_CAP_TABLE);
+
+        let mmio_cap = Capability::new(
+            CapType::DeviceMmio,
+            CapRights::READ | CapRights::WRITE | CapRights::GRANT,
+            mmio_base,
+            0xD001,
+        );
+        let _ = table.insert_at(CAP_DRV_MMIO as usize, mmio_cap);
+
+        let dma_cap = Capability::new(
+            CapType::DmaBuffer,
+            CapRights::READ | CapRights::WRITE | CapRights::GRANT,
+            dma_phys_addr,
+            0xD002,
+        );
+        let _ = table.insert_at(CAP_DRV_DMA as usize, dma_cap);
+
+        let irq_cap = Capability::new(
+            CapType::Irq,
+            CapRights::READ | CapRights::WRITE | CapRights::GRANT,
+            irq_line as u64,
+            0xD003,
+        );
+        let _ = table.insert_at(CAP_DRV_IRQ as usize, irq_cap);
     }
 }
 
@@ -362,5 +487,14 @@ pub fn init() {
             0,
         );
         let _ = table.insert_at(CAP_MEM_SHARED as usize, mem_cap);
+
+        // Slot 5: System Power Control capability (Shutdown / Cold Reboot / Warm Reboot)
+        let power_cap = Capability::new(
+            CapType::System,
+            CapRights::WRITE | CapRights::GRANT,
+            5,
+            0x0000_9001,
+        );
+        let _ = table.insert_at(CAP_SYS_POWER as usize, power_cap);
     }
 }

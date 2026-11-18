@@ -16,6 +16,9 @@ pub enum CapType {
     Memory = 2,
     IpcEndpoint = 3,
     Thread = 4,
+    DeviceMmio = 5,
+    DmaBuffer = 6,
+    Irq = 7,
 }
 
 #[allow(dead_code)]
@@ -174,6 +177,10 @@ pub const CAP_SYS_CONSOLE: u32 = 1;
 pub const CAP_SYS_INFO: u32 = 2;
 pub const CAP_IPC_ENDPOINT_INIT: u32 = 3;
 pub const CAP_MEM_SHARED: u32 = 4;
+pub const CAP_SYS_POWER: u32 = 5;
+pub const CAP_DRV_MMIO: u32 = 6;
+pub const CAP_DRV_DMA: u32 = 7;
+pub const CAP_DRV_IRQ: u32 = 8;
 
 #[allow(dead_code)]
 static CAP_OPERATIONS_COUNT: AtomicU64 = AtomicU64::new(0);

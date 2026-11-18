@@ -88,10 +88,10 @@ Run Automated Kernel Self-Tests & Inspect Serial Logs
 - [x] Implement fast IPC endpoints and shared-memory ring buffers.
 - [x] Load and execute the first userspace `init` process (ELF or custom binary format).
 
-### Milestone 1.6 — Driver Foundation (Bridge to Phase 2)
-- [ ] Implement PCIe bus enumeration and ACPI parsing.
-- [ ] Expose capability-gated MMIO / DMA / IRQ primitives to userspace driver processes.
-- [ ] Build first userspace VirtIO-Blk / NVMe driver to unlock Phase 2 (Custom File System).
+### Milestone 1.6 — Driver Foundation & Power Control (Bridge to Phase 2)
+- [x] Implement PCIe bus enumeration (MCFG ECAM + legacy fallback) and ACPI parsing (FADT, MCFG, DSDT `_S5_`).
+- [x] Implement hardware power management (UEFI Runtime Services `ResetSystem`, ACPI S5/Reset, hypervisor fallbacks) and capability-gated `SYS_POWER_CONTROL` + interactive shutdown/reboot signaling.
+- [x] Expose capability-gated MMIO / DMA / IRQ primitives (`SYS_DRIVER_MMIO_*`, `SYS_DRIVER_DMA_INFO`, `SYS_DRIVER_IRQ_ACK`) for userspace VirtIO-Blk / NVMe drivers to unlock Phase 2 (Custom File System).
 
 ---
 

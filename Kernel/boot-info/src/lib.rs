@@ -4,7 +4,7 @@
 pub const BOOT_INFO_MAGIC: u64 = 0x4E4F_5242_454C_4543;
 
 /// Version of the Celebron Boot Hand-off ABI.
-pub const BOOT_INFO_VERSION: u32 = 1;
+pub const BOOT_INFO_VERSION: u32 = 2;
 
 /// Maximum number of normalized physical memory regions passed from bootloader to kernel.
 pub const MAX_MEMORY_REGIONS: usize = 512;
@@ -95,6 +95,8 @@ pub struct BootInfo {
     pub framebuffer: FramebufferInfo,
     /// Physical address of the ACPI RSDP (Root System Description Pointer), or 0 if not found.
     pub acpi_rsdp_address: u64,
+    /// Physical address of the UEFI Runtime Services table (`EFI_RUNTIME_SERVICES`), or 0 if unavailable.
+    pub uefi_runtime_services: u64,
     /// Total usable conventional RAM detected (in bytes).
     pub total_usable_ram_bytes: u64,
     /// Number of valid entries in `memory_regions`.
@@ -118,6 +120,7 @@ impl BootInfo {
                 format: PixelFormat::Bgr,
             },
             acpi_rsdp_address: 0,
+            uefi_runtime_services: 0,
             total_usable_ram_bytes: 0,
             memory_region_count: 0,
             memory_regions: [MemoryRegion::empty(); MAX_MEMORY_REGIONS],
