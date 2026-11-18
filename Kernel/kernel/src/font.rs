@@ -21,6 +21,10 @@ pub const fn glyph_8x8(ch: u8) -> [u8; 8] {
         b'!' => [0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00],
         b'"' => [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00],
         b'#' => [0x6C, 0x6C, 0xFE, 0x6C, 0xFE, 0x6C, 0x6C, 0x00],
+        b'$' => [0x18, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x18, 0x00],
+        b'%' => [0x62, 0x66, 0x0C, 0x18, 0x30, 0x66, 0x46, 0x00],
+        b'&' => [0x38, 0x6C, 0x38, 0x76, 0xDC, 0xCC, 0x76, 0x00],
+        b'\'' => [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00],
         b'(' => [0x0C, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00],
         b')' => [0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00],
         b'*' => [0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00],
@@ -75,7 +79,12 @@ pub const fn glyph_8x8(ch: u8) -> [u8; 8] {
         b'[' => [0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00],
         b'\\' => [0xC0, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00],
         b']' => [0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00],
+        b'^' => [0x10, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00],
         b'_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00],
+        b'{' => [0x0E, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0E, 0x00],
+        b'|' => [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00],
+        b'}' => [0x70, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x70, 0x00],
+        b'~' => [0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         b'a'..=b'z' => glyph_8x8(ch - 32),
         _ => [0x7E, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x00],
     }
@@ -112,15 +121,23 @@ impl FramebufferCanvas {
         }
     }
 
-    /// Draw a single character scaled by `scale` (e.g. 2 = 16x16 pixels).
-    pub fn draw_char(&self, x0: usize, y0: usize, ch: u8, color: u32, scale: usize) {
+    /// Draw a single character with independent horizontal (`scale_x`) and vertical (`scale_y`) scaling.
+    pub fn draw_char_xy(
+        &self,
+        x0: usize,
+        y0: usize,
+        ch: u8,
+        color: u32,
+        scale_x: usize,
+        scale_y: usize,
+    ) {
         let rows = glyph_8x8(ch);
         for (ry, row_bits) in rows.iter().copied().enumerate() {
             for rx in 0..8 {
                 if (row_bits & (0x80 >> rx)) != 0 {
-                    for sy in 0..scale {
-                        for sx in 0..scale {
-                            self.put_pixel(x0 + rx * scale + sx, y0 + ry * scale + sy, color);
+                    for sy in 0..scale_y {
+                        for sx in 0..scale_x {
+                            self.put_pixel(x0 + rx * scale_x + sx, y0 + ry * scale_y + sy, color);
                         }
                     }
                 }
@@ -128,11 +145,17 @@ impl FramebufferCanvas {
         }
     }
 
-    /// Draw an ASCII string at `(x0, y0)` with character scale `scale`.
+    /// Draw an ASCII string at `(x0, y0)` using crisp 8x16 terminal proportions when `scale == 1`
+    /// or bold 16x16 banner proportions when `scale == 2`.
     pub fn draw_str(&self, mut x: usize, y: usize, text: &str, color: u32, scale: usize) -> usize {
-        let step = 8 * scale + scale; // 1-unit spacing between characters
+        let (scale_x, scale_y, gap) = if scale <= 1 {
+            (1, 2, 2) // 8x16 glyph + 2px spacing = 10px per character (fits ~90 chars in 944px card)
+        } else {
+            (scale, scale, scale)
+        };
+        let step = 8 * scale_x + gap;
         for b in text.bytes() {
-            self.draw_char(x, y, b, color, scale);
+            self.draw_char_xy(x, y, b, color, scale_x, scale_y);
             x += step;
         }
         x

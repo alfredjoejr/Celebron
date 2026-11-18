@@ -32,69 +32,69 @@ fn render_boot_dashboard(boot_info: &BootInfo, usable_regions: usize) {
     // 2. Header panel
     let card_w = fb.width.saturating_sub(80);
     canvas.fill_rect(40, 36, card_w, 96, panel_bg);
-    canvas.fill_rect(40, 36, 10, 96, accent_cyan);
+    canvas.fill_rect(40, 36, 8, 96, accent_cyan);
 
-    canvas.draw_str(72, 54, "CELEBRON OS V0.1 - PURE MICROKERNEL (RING 0)", accent_cyan, 2);
+    canvas.draw_str(68, 52, "CELEBRON OS V0.1 - PURE MICROKERNEL (RING 0)", accent_cyan, 2);
     canvas.draw_str(
-        72,
+        68,
         92,
         "PROPRIETARY 64-BIT CAPABILITY ARCHITECTURE | X86_64 LONG MODE",
         text_white,
-        2,
+        1,
     );
 
     // 3. Telemetry panel
-    let body_h = fb.height.saturating_sub(200).min(380);
+    let body_h = fb.height.saturating_sub(200).min(340);
     canvas.fill_rect(40, 156, card_w, body_h, panel_bg);
-    canvas.fill_rect(40, 156, 10, body_h, status_green);
+    canvas.fill_rect(40, 156, 8, body_h, status_green);
 
     let mut y = 182;
-    let line_step = 38;
+    let line_step = 34;
 
     // Row 1: UEFI Bootloader hand-off
-    let mut x = canvas.draw_str(72, y, "[OK] CUSTOM UEFI BOOTLOADER HAND-OFF: ABI V", status_green, 2);
-    x = canvas.draw_u64_dec(x, y, boot_info.version as u64, text_white, 2);
-    canvas.draw_str(x, y, " VERIFIED", text_white, 2);
+    let mut x = canvas.draw_str(68, y, "[OK] CUSTOM UEFI BOOTLOADER HAND-OFF: ABI V", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, boot_info.version as u64, text_white, 1);
+    canvas.draw_str(x, y, " VERIFIED", text_white, 1);
     y += line_step;
 
     // Row 2: Magic signature
-    x = canvas.draw_str(72, y, "[OK] BOOTINFO SIGNATURE: CELEBRON (", status_green, 2);
-    x = canvas.draw_u64_hex(x, y, boot_info.magic, accent_cyan, 2);
-    canvas.draw_str(x, y, ")", status_green, 2);
+    x = canvas.draw_str(68, y, "[OK] BOOTINFO SIGNATURE: CELEBRON (", status_green, 1);
+    x = canvas.draw_u64_hex(x, y, boot_info.magic, accent_cyan, 1);
+    canvas.draw_str(x, y, ")", status_green, 1);
     y += line_step;
 
     // Row 3: GOP Framebuffer
-    x = canvas.draw_str(72, y, "[OK] UEFI GOP FRAMEBUFFER: ", status_green, 2);
-    x = canvas.draw_u64_dec(x, y, fb.width as u64, text_white, 2);
-    x = canvas.draw_str(x, y, "X", text_white, 2);
-    x = canvas.draw_u64_dec(x, y, fb.height as u64, text_white, 2);
-    x = canvas.draw_str(x, y, " @ ", text_muted, 2);
-    canvas.draw_u64_hex(x, y, fb.base_address, accent_cyan, 2);
+    x = canvas.draw_str(68, y, "[OK] UEFI GOP FRAMEBUFFER: ", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, fb.width as u64, text_white, 1);
+    x = canvas.draw_str(x, y, "X", text_white, 1);
+    x = canvas.draw_u64_dec(x, y, fb.height as u64, text_white, 1);
+    x = canvas.draw_str(x, y, " @ ", text_muted, 1);
+    canvas.draw_u64_hex(x, y, fb.base_address, accent_cyan, 1);
     y += line_step;
 
     // Row 4: ACPI RSDP
-    x = canvas.draw_str(72, y, "[OK] ACPI 2.0 RSDP TABLE ADDRESS: ", status_green, 2);
-    canvas.draw_u64_hex(x, y, boot_info.acpi_rsdp_address, accent_cyan, 2);
+    x = canvas.draw_str(68, y, "[OK] ACPI 2.0 RSDP TABLE ADDRESS: ", status_green, 1);
+    canvas.draw_u64_hex(x, y, boot_info.acpi_rsdp_address, accent_cyan, 1);
     y += line_step;
 
     // Row 5: Usable RAM
     let usable_mib = boot_info.total_usable_ram_bytes / (1024 * 1024);
-    x = canvas.draw_str(72, y, "[OK] USABLE PHYSICAL RAM: ", status_green, 2);
-    x = canvas.draw_u64_dec(x, y, usable_mib, text_white, 2);
-    x = canvas.draw_str(x, y, " MIB (", text_white, 2);
-    x = canvas.draw_u64_dec(x, y, boot_info.memory_region_count as u64, accent_cyan, 2);
-    x = canvas.draw_str(x, y, " REGIONS / ", text_muted, 2);
-    x = canvas.draw_u64_dec(x, y, usable_regions as u64, accent_cyan, 2);
-    canvas.draw_str(x, y, " RAM RANGES)", text_muted, 2);
-    y += line_step + 14;
+    x = canvas.draw_str(68, y, "[OK] USABLE PHYSICAL RAM: ", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, usable_mib, text_white, 1);
+    x = canvas.draw_str(x, y, " MIB (", text_white, 1);
+    x = canvas.draw_u64_dec(x, y, boot_info.memory_region_count as u64, accent_cyan, 1);
+    x = canvas.draw_str(x, y, " REGIONS / ", text_muted, 1);
+    x = canvas.draw_u64_dec(x, y, usable_regions as u64, accent_cyan, 1);
+    canvas.draw_str(x, y, " RAM RANGES)", text_muted, 1);
+    y += line_step + 16;
 
     // Row 6: Active milestone status
     canvas.draw_str(
-        72,
+        68,
         y,
         "STATUS: MILESTONE 1.1 ONLINE - READY FOR PMM & VMM PAGING",
         accent_cyan,
-        2,
+        1,
     );
 }
 
