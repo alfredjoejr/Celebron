@@ -68,9 +68,9 @@ Run Automated Kernel Self-Tests & Inspect Serial Logs
 - [x] Implement kernel panic handler.
 
 ### Milestone 1.2 — Memory Management
-- [ ] Parse UEFI memory map and build the Physical Memory Manager (PMM).
-- [ ] Set up higher-half kernel paging and Virtual Memory Manager (VMM).
-- [ ] Implement kernel heap allocator (`alloc` support).
+- [x] Parse UEFI memory map and build the Physical Memory Manager (PMM).
+- [x] Set up higher-half kernel paging and Virtual Memory Manager (VMM).
+- [x] Implement kernel heap allocator (`alloc` support).
 
 ### Milestone 1.3 — Interrupts & Timing
 - [ ] Configure GDT, TSS, and IDT (CPU exceptions + double-fault stack).
