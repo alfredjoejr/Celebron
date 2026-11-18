@@ -132,6 +132,7 @@ ISR_ERR   29
 ISR_ERR   30
 ISR_NOERR 31
 ISR_NOERR 32
+ISR_NOERR 48
 ISR_NOERR 255
 
 .global isr_stub_unhandled
@@ -217,6 +218,7 @@ extern "C" {
     fn isr_stub_30();
     fn isr_stub_31();
     fn isr_stub_32();
+    fn isr_stub_48();
     fn isr_stub_255();
     fn isr_stub_unhandled();
 }
@@ -270,6 +272,11 @@ pub extern "sysv64" fn rust_interrupt_dispatch(
         32 => {
             crate::interrupts::on_timer_tick();
             crate::scheduler::schedule_on_tick(frame_ptr)
+        }
+        48 => {
+            crate::hyperv::on_synic_interrupt();
+            crate::interrupts::send_eoi();
+            frame_ptr
         }
         255 => {
             // APIC Spurious Interrupt: per Intel SDM, do NOT send EOI.
@@ -376,6 +383,14 @@ pub fn init() {
                 IDT_INTERRUPT_GATE_RING0,
             );
         }
+
+        // Vector 48 (0x30): Hyper-V SynIC SINT2 / VMBus Interrupt
+        (&mut *idt_ptr.add(48)).set_handler(
+            isr_stub_48 as *const () as usize as u64,
+            KERNEL_CODE_SELECTOR,
+            0,
+            IDT_INTERRUPT_GATE_RING0,
+        );
 
         // Vector 255 (0xFF): Local APIC Spurious Interrupt
         (&mut *idt_ptr.add(255)).set_handler(

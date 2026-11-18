@@ -189,26 +189,41 @@ pub fn execute_shutdown() -> ! {
         asm!("cli", options(nomem, nostack, preserves_flags));
         let st = &*addr_of_mut!(POWER_STATE);
 
-        // Tier 1: UEFI Runtime Services ResetSystem(EfiResetShutdown)
-        if let Some(reset_fn) = st.uefi_reset_fn {
-            crate::kprintln!("[CELEBRON-POWER] Invoking UEFI Runtime ResetSystem(EfiResetShutdown)...");
-            reset_fn(EFI_RESET_SHUTDOWN, 0, 0, core::ptr::null());
-        }
-
-        // Tier 2: ACPI HW-Reduced Sleep Control Register (if present)
+        // Tier 1: ACPI HW-Reduced Sleep Control Register (Hyper-V Gen 2 / Modern UEFI)
         if st.acpi.hw_reduced && st.acpi.sleep_control_reg.address != 0 {
             let slp_val = (((st.acpi.slp_typa & 0x07) as u8) << 2) | (1 << 5); // SLP_EN = bit 5
+            crate::kprintln!(
+                "[CELEBRON-POWER] Writing ACPI HW-Reduced SLEEP_CONTROL_REG (slp_typa={})...",
+                st.acpi.slp_typa
+            );
             write_gas_u8(st.acpi.sleep_control_reg, slp_val);
+            for _ in 0..2_000_000u64 {
+                core::hint::spin_loop();
+            }
         }
 
-        // Tier 3: Standard ACPI FADT PM1a_CNT_BLK / PM1b_CNT_BLK S5 transition
+        // Tier 2: Standard ACPI FADT PM1a_CNT_BLK / PM1b_CNT_BLK S5 transition
         if st.acpi.pm1a_cnt_blk != 0 {
             let cmd = ((st.acpi.slp_typa & 0x07) << 10) | (1 << 13); // SLP_EN = bit 13
+            crate::kprintln!(
+                "[CELEBRON-POWER] Writing ACPI PM1a_CNT_BLK 0x{:X} <- 0x{:04X}...",
+                st.acpi.pm1a_cnt_blk,
+                cmd
+            );
             outw(st.acpi.pm1a_cnt_blk as u16, cmd);
             if st.acpi.pm1b_cnt_blk != 0 {
                 let cmd_b = ((st.acpi.slp_typb & 0x07) << 10) | (1 << 13);
                 outw(st.acpi.pm1b_cnt_blk as u16, cmd_b);
             }
+            for _ in 0..2_000_000u64 {
+                core::hint::spin_loop();
+            }
+        }
+
+        // Tier 3: UEFI Runtime Services ResetSystem(EfiResetShutdown)
+        if let Some(reset_fn) = st.uefi_reset_fn {
+            crate::kprintln!("[CELEBRON-POWER] Invoking UEFI Runtime ResetSystem(EfiResetShutdown)...");
+            reset_fn(EFI_RESET_SHUTDOWN, 0, 0, core::ptr::null());
         }
 
         // Tier 4: Hypervisor / Emulator fallback ports (QEMU, VirtualBox, Bochs)
@@ -233,16 +248,20 @@ pub fn execute_reboot(warm: bool) -> ! {
         asm!("cli", options(nomem, nostack, preserves_flags));
         let st = &*addr_of_mut!(POWER_STATE);
 
-        // Tier 1: UEFI Runtime Services ResetSystem(EfiResetCold / EfiResetWarm)
+        // Tier 1: ACPI FADT RESET_REG
+        if st.acpi.reset_reg_supported && st.acpi.reset_reg.address != 0 {
+            crate::kprintln!("[CELEBRON-POWER] Writing ACPI FADT RESET_REG...");
+            write_gas_u8(st.acpi.reset_reg, st.acpi.reset_value);
+            for _ in 0..2_000_000u64 {
+                core::hint::spin_loop();
+            }
+        }
+
+        // Tier 2: UEFI Runtime Services ResetSystem(EfiResetCold / EfiResetWarm)
         if let Some(reset_fn) = st.uefi_reset_fn {
             let reset_ty = if warm { EFI_RESET_WARM } else { EFI_RESET_COLD };
             crate::kprintln!("[CELEBRON-POWER] Invoking UEFI Runtime ResetSystem({})...", reset_ty);
             reset_fn(reset_ty, 0, 0, core::ptr::null());
-        }
-
-        // Tier 2: ACPI FADT RESET_REG
-        if st.acpi.reset_reg_supported && st.acpi.reset_reg.address != 0 {
-            write_gas_u8(st.acpi.reset_reg, st.acpi.reset_value);
         }
 
         // Tier 3: PCI Reset Control Register (0xCF9)

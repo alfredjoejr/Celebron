@@ -18,6 +18,7 @@ const APIC_REG_TIMER_INIT_COUNT: u32 = 0x380;
 const APIC_REG_TIMER_DIVIDE: u32 = 0x3E0;
 
 pub const TIMER_INTERRUPT_VECTOR: u32 = 32;
+pub const HYPERV_VMBUS_VECTOR: u32 = 48;
 const APIC_SPURIOUS_VECTOR: u32 = 0xFF;
 const APIC_TIMER_PERIODIC_MODE: u32 = 1 << 17;
 const APIC_TIMER_DIVIDE_BY_16: u32 = 0x03;
@@ -149,6 +150,14 @@ pub fn init_apic_and_timer() -> ApicInfo {
 #[inline(always)]
 pub fn on_timer_tick() {
     TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    unsafe {
+        write_apic_reg(APIC_REG_EOI, 0);
+    }
+}
+
+/// Send End-of-Interrupt (EOI) to the Local APIC (for SynIC / external vectors).
+#[inline(always)]
+pub fn send_eoi() {
     unsafe {
         write_apic_reg(APIC_REG_EOI, 0);
     }
