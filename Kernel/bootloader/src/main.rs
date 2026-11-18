@@ -6,7 +6,7 @@ mod serial;
 mod uefi_raw;
 
 use celebron_boot_info::{
-    BootInfo, FramebufferInfo, KernelEntryFn, MemoryRegion, MemoryRegionKind, PixelFormat,
+    BootInfo, FramebufferInfo, MemoryRegion, MemoryRegionKind, PixelFormat,
     MAX_MEMORY_REGIONS,
 };
 use core::arch::asm;
@@ -371,23 +371,22 @@ pub extern "efiapi" fn efi_main(
         }
 
         // 5. Boot services are now terminated! Disable interrupts, switch to our 16-byte aligned
-        //    64 KiB Kernel Boot Stack, and jump to the kernel entry point (`sysv64` ABI: rdi = &BOOT_INFO).
-        let boot_info_ptr = core::ptr::addr_of!(BOOT_INFO);
+        //    64 KiB Kernel Boot Stack, and call the kernel entry point (`sysv64` ABI: rdi = &BOOT_INFO).
+        let boot_info_ptr = core::ptr::addr_of!(BOOT_INFO) as usize;
         let stack_top = (core::ptr::addr_of!(KERNEL_BOOT_STACK.0) as usize
             + core::mem::size_of::<KernelBootStack>())
             & !0xFusize;
-
-        let kernel_entry: KernelEntryFn = core::mem::transmute(kernel_entry_addr as usize);
 
         asm!(
             "cli",
             "mov rsp, {stack_top}",
             "xor rbp, rbp",
+            "call {entry}",
             stack_top = in(reg) stack_top,
-            options(nostack)
+            entry = in(reg) kernel_entry_addr as usize,
+            in("rdi") boot_info_ptr,
+            options(noreturn)
         );
-
-        kernel_entry(&*boot_info_ptr);
     }
 }
 
