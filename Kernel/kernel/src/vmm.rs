@@ -44,19 +44,25 @@ pub struct VirtualMemoryManager {
 
 impl VirtualMemoryManager {
     /// Fetch an existing child page table or allocate a fresh zeroed 4 KiB frame from PMM.
+    /// If `flags` contains `PAGE_USER`, intermediate table entries also have `PAGE_USER` set
+    /// so the x86_64 MMU allows Ring-3 access to child user pages.
     unsafe fn get_or_alloc_next_table(
         parent: &mut PageTable,
         index: usize,
+        flags: u64,
         pmm: &mut PhysicalMemoryManager,
         page_tables_allocated: &mut usize,
     ) -> &'static mut PageTable {
+        let user_bit = flags & PAGE_USER;
         if (parent.entries[index] & PAGE_PRESENT) == 0 {
             let frame_phys = pmm
                 .alloc_frame()
                 .expect("Out of physical memory while allocating page table");
             // `alloc_frame` guarantees the 4 KiB frame is already zeroed.
-            parent.entries[index] = frame_phys | PAGE_PRESENT | PAGE_WRITABLE;
+            parent.entries[index] = frame_phys | PAGE_PRESENT | PAGE_WRITABLE | user_bit;
             *page_tables_allocated += 1;
+        } else if user_bit != 0 {
+            parent.entries[index] |= PAGE_USER;
         }
         let child_phys = parent.entries[index] & ADDR_MASK;
         &mut *(child_phys as *mut PageTable)
@@ -78,12 +84,14 @@ impl VirtualMemoryManager {
         let pdpt = Self::get_or_alloc_next_table(
             pml4,
             pml4_idx,
+            flags,
             pmm,
             &mut self.page_tables_allocated,
         );
         let pd = Self::get_or_alloc_next_table(
             pdpt,
             pdpt_idx,
+            flags,
             pmm,
             &mut self.page_tables_allocated,
         );
@@ -109,23 +117,32 @@ impl VirtualMemoryManager {
         let pdpt = Self::get_or_alloc_next_table(
             pml4,
             pml4_idx,
+            flags,
             pmm,
             &mut self.page_tables_allocated,
         );
         let pd = Self::get_or_alloc_next_table(
             pdpt,
             pdpt_idx,
+            flags,
             pmm,
             &mut self.page_tables_allocated,
         );
         let pt = Self::get_or_alloc_next_table(
             pd,
             pd_idx,
+            flags,
             pmm,
             &mut self.page_tables_allocated,
         );
 
         pt.entries[pt_idx] = (phys_addr & ADDR_MASK) | flags | PAGE_PRESENT;
+        Self::invlpg(virt_addr);
+    }
+
+    /// Invalidate a TLB translation for a single 4 KiB virtual page.
+    pub unsafe fn invlpg(virt_addr: u64) {
+        asm!("invlpg [{}]", in(reg) virt_addr, options(nostack, preserves_flags));
     }
 
     /// Construct Celebron's 4-level page tables and load `CR3`.

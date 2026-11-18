@@ -47,6 +47,11 @@ pub fn _kprint(args: fmt::Arguments) {
 }
 
 #[macro_export]
+macro_rules! kprint {
+    ($($arg:tt)*) => ($crate::serial::_kprint(format_args!($($arg)*)));
+}
+
+#[macro_export]
 macro_rules! kprintln {
     () => ($crate::serial::_kprint(format_args!("\n")));
     ($($arg:tt)*) => ($crate::serial::_kprint(format_args!("{}\n", format_args!($($arg)*))));

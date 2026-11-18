@@ -124,3 +124,13 @@ pub fn init() {
         );
     }
 }
+
+/// Dynamically update `TSS.rsp[0]`.
+/// Used by the scheduler when switching to a Ring-3 thread so that any subsequent
+/// interrupt or CPU exception automatically transitions to that thread's dedicated kernel stack.
+pub fn set_tss_rsp0(stack_top: u64) {
+    unsafe {
+        let tss_ptr = addr_of_mut!(TSS);
+        (*tss_ptr).rsp[0] = stack_top;
+    }
+}

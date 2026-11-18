@@ -3,7 +3,9 @@
 //! higher-half heap (`0xFFFF_C000_0000_0000`), and performs hardware-driven preemptive
 //! context switches inside the Local APIC Timer ISR (Vector 32).
 
-use crate::gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
+use crate::gdt::{
+    KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, USER_CODE_SELECTOR, USER_DATA_SELECTOR,
+};
 use crate::idt::InterruptFrame;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -46,10 +48,12 @@ pub struct ThreadControlBlock {
     pub priority: ThreadPriority,
     pub state: ThreadState,
     pub saved_rsp: u64,
+    pub kernel_stack_top: u64,
     pub ticks_executed: u64,
     pub remaining_quantum: u64,
     /// Owned heap-allocated stack for spawned threads (`None` for TID 0 boot thread).
     pub _stack: Option<Vec<u8>>,
+    pub is_user: bool,
 }
 
 impl ThreadControlBlock {
@@ -60,9 +64,11 @@ impl ThreadControlBlock {
             priority: ThreadPriority::Normal,
             state: ThreadState::Unused,
             saved_rsp: 0,
+            kernel_stack_top: 0,
             ticks_executed: 0,
             remaining_quantum: 1,
             _stack: None,
+            is_user: false,
         }
     }
 }
@@ -181,9 +187,11 @@ pub fn spawn_kernel_thread(
             priority,
             state: ThreadState::Ready,
             saved_rsp: frame_addr,
+            kernel_stack_top: stack_top,
             ticks_executed: 0,
             remaining_quantum: priority.time_quantum_ticks(),
             _stack: Some(stack),
+            is_user: false,
         };
         sched.thread_count += 1;
         crate::kprintln!(
@@ -192,6 +200,84 @@ pub fn spawn_kernel_thread(
             sched.threads[idx].name,
             sched.threads[idx].priority,
             stack_top
+        );
+        tid
+    }
+}
+
+/// Spawn a new Ring-3 userspace thread.
+/// Sets up a synthetic `InterruptFrame` with `USER_CODE_SELECTOR` and `USER_DATA_SELECTOR`.
+/// Allocates a 16 KiB Ring-0 privilege stack that is dynamically loaded into `TSS.rsp[0]`
+/// on context switch so interrupts/exceptions in Ring 3 have a clean kernel stack.
+pub fn spawn_user_thread(
+    name: &'static str,
+    priority: ThreadPriority,
+    user_entry_rip: u64,
+    user_rsp: u64,
+) -> usize {
+    unsafe {
+        let sched = &mut *addr_of_mut!(SCHEDULER);
+        let idx = sched.thread_count;
+        assert!(idx < MAX_THREADS, "Maximum threads reached");
+
+        let mut kernel_stack = vec![0u8; THREAD_STACK_SIZE];
+        let stack_base = kernel_stack.as_mut_ptr() as u64;
+        let kernel_stack_top = (stack_base + THREAD_STACK_SIZE as u64) & !0xFu64;
+
+        // Place initial InterruptFrame at the top of this thread's kernel stack
+        let frame_addr =
+            (kernel_stack_top - core::mem::size_of::<InterruptFrame>() as u64) & !0xFu64;
+        let frame_ptr = frame_addr as *mut InterruptFrame;
+
+        core::ptr::write(
+            frame_ptr,
+            InterruptFrame {
+                rax: 0,
+                rbx: 0,
+                rcx: 0,
+                rdx: 0,
+                rsi: 0,
+                rdi: 0,
+                rbp: 0,
+                r8: 0,
+                r9: 0,
+                r10: 0,
+                r11: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                vector: 32,
+                error_code: 0,
+                rip: user_entry_rip,
+                cs: USER_CODE_SELECTOR as u64,
+                rflags: 0x202, // IF=1, bit 1 reserved=1
+                rsp: user_rsp,
+                ss: USER_DATA_SELECTOR as u64,
+            },
+        );
+
+        let tid = idx;
+        sched.threads[idx] = ThreadControlBlock {
+            tid,
+            name,
+            priority,
+            state: ThreadState::Ready,
+            saved_rsp: frame_addr,
+            kernel_stack_top,
+            ticks_executed: 0,
+            remaining_quantum: priority.time_quantum_ticks(),
+            _stack: Some(kernel_stack),
+            is_user: true,
+        };
+        sched.thread_count += 1;
+        crate::kprintln!(
+            "[CELEBRON-SCHED] Spawned Ring-3 user thread TID={} '{}' (rip=0x{:016X}, user_rsp=0x{:016X}, kstack_top=0x{:016X})",
+            sched.threads[idx].tid,
+            sched.threads[idx].name,
+            user_entry_rip,
+            user_rsp,
+            kernel_stack_top
         );
         tid
     }
@@ -207,9 +293,11 @@ pub fn init_and_spawn_workers() {
             priority: ThreadPriority::Normal,
             state: ThreadState::Running,
             saved_rsp: 0,
+            kernel_stack_top: 0,
             ticks_executed: 0,
             remaining_quantum: ThreadPriority::Normal.time_quantum_ticks(),
             _stack: None,
+            is_user: false,
         };
         sched.current_idx = 0;
         sched.thread_count = 1;
@@ -274,6 +362,10 @@ pub fn schedule_on_tick(current_rsp: *mut InterruptFrame) -> *mut InterruptFrame
 
         if next_idx != cur {
             CONTEXT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+
+        if sched.threads[next_idx].is_user {
+            crate::gdt::set_tss_rsp0(sched.threads[next_idx].kernel_stack_top);
         }
 
         sched.threads[next_idx].saved_rsp as *mut InterruptFrame

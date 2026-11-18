@@ -3,15 +3,19 @@
 
 extern crate alloc;
 
+mod capability;
 mod font;
 mod gdt;
 mod heap;
 mod idt;
 mod interrupts;
+mod ipc;
 mod pmm;
 mod scheduler;
 mod serial;
 mod smp;
+mod syscall;
+mod userspace;
 mod vmm;
 
 use alloc::boxed::Box;
@@ -45,6 +49,8 @@ fn render_boot_dashboard(
     apic_info: &ApicInfo,
     smp_info: &SmpInfo,
     sched_stats: &SchedulerStats,
+    syscall_stats: &syscall::SyscallStats,
+    user_info: &userspace::UserspaceInfo,
     initial_ticks: u64,
 ) -> Option<DashboardLiveCoords> {
     if boot_info.has_framebuffer == 0 {
@@ -85,7 +91,7 @@ fn render_boot_dashboard(
     canvas.fill_rect(40, 152, 8, body_h, status_green);
 
     let mut y = 174;
-    let line_step = 30;
+    let line_step = 28;
 
     // Row 1: BootInfo ABI & Signature
     let mut x = canvas.draw_str(68, y, "[OK] UEFI BOOTLOADER: ABI V", status_green, 1);
@@ -185,14 +191,38 @@ fn render_boot_dashboard(
         sched_x,
         sched_y,
     };
-    render_live_scheduler_counters(boot_info, &coords, initial_ticks, sched_stats);
-    y += line_step + 16;
+    render_live_scheduler_counters(
+        boot_info,
+        &coords,
+        initial_ticks,
+        sched_stats,
+        syscall_stats,
+    );
+    y += line_step;
 
-    // Row 11: Active milestone status
+    // Row 11: Capability system & Fast IPC
     canvas.draw_str(
         68,
         y,
-        "STATUS: MILESTONE 1.4 ONLINE - SMP & PREEMPTIVE MULTITASKING ACTIVE",
+        "[OK] CAPABILITIES: 64 SLOTS | IPC: RENDEZVOUS & SPSC RING BUFFER ONLINE",
+        status_green,
+        1,
+    );
+    y += line_step;
+
+    // Row 12: Ring-3 Userspace Task
+    x = canvas.draw_str(68, y, "[OK] RING-3 USERSPACE: TID ", status_green, 1);
+    x = canvas.draw_u64_dec(x, y, user_info.tid as u64, text_white, 1);
+    x = canvas.draw_str(x, y, " 'uinit-task' @ ", text_white, 1);
+    x = canvas.draw_u64_hex(x, y, user_info.code_vaddr, accent_cyan, 1);
+    canvas.draw_str(x, y, " (16 KIB STACK) | SYSCALLS ACTIVE", text_muted, 1);
+    y += line_step + 14;
+
+    // Row 13: Active milestone status
+    canvas.draw_str(
+        68,
+        y,
+        "STATUS: MILESTONE 1.5 ONLINE - RING-3 USERSPACE, CAPABILITIES & IPC ACTIVE",
         accent_cyan,
         1,
     );
@@ -200,12 +230,13 @@ fn render_boot_dashboard(
     Some(coords)
 }
 
-/// Update only the live timer tick & preemptive scheduler counters without full-screen flicker.
+/// Update only the live timer tick, preemptive scheduler, and userspace syscall counters.
 fn render_live_scheduler_counters(
     boot_info: &BootInfo,
     coords: &DashboardLiveCoords,
     ticks: u64,
     sched_stats: &SchedulerStats,
+    syscall_stats: &syscall::SyscallStats,
 ) {
     if boot_info.has_framebuffer == 0 {
         return;
@@ -221,7 +252,7 @@ fn render_live_scheduler_counters(
     canvas.fill_rect(coords.tick_x, coords.tick_y, 220, 18, panel_bg);
     canvas.draw_u64_dec(coords.tick_x, coords.tick_y, ticks, accent_cyan, 1);
 
-    // 2. Update preemptive context switches & worker thread operations
+    // 2. Update preemptive context switches, worker thread ops, and userspace syscalls
     let clear_w = fb.width.saturating_sub(coords.sched_x + 48);
     canvas.fill_rect(coords.sched_x, coords.sched_y, clear_w, 18, panel_bg);
     let mut x = canvas.draw_u64_dec(
@@ -245,6 +276,14 @@ fn render_live_scheduler_counters(
         coords.sched_y,
         sched_stats.worker_cognitive_ops,
         text_white,
+        1,
+    );
+    x = canvas.draw_str(x, coords.sched_y, ", SC: ", text_muted, 1);
+    x = canvas.draw_u64_dec(
+        x,
+        coords.sched_y,
+        syscall_stats.total_syscalls,
+        accent_cyan,
         1,
     );
     canvas.draw_str(x, coords.sched_y, ")", text_muted, 1);
@@ -318,7 +357,7 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     );
 
     // 2. Initialize Virtual Memory Manager (VMM) and switch CR3
-    let vmm = vmm::VirtualMemoryManager::init(&mut pmm, boot_info);
+    let mut vmm = vmm::VirtualMemoryManager::init(&mut pmm, boot_info);
     kprintln!(
         "[CELEBRON-VMM] Active CR3=0x{:016X} ({} page tables, {} heap pages mapped @ 0x{:016X})",
         vmm.pml4_phys,
@@ -434,10 +473,29 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 9. Initialize Preemptive Priority/Round-Robin Scheduler & spawn background Ring-0 worker threads
     scheduler::init_and_spawn_workers();
 
-    // 10. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
+    // 10. Verify Capability & Fast IPC Subsystems
+    let cap_test_ok = capability::run_self_test();
+    let ipc_test_ok = ipc::run_self_test();
+    assert!(cap_test_ok && ipc_test_ok, "Capability/IPC self-test failed");
+    kprintln!("[CELEBRON-CAP] Capability subsystem self-test passed (64 slots, unforgeable handles)");
+    kprintln!("[CELEBRON-IPC] Fast IPC rendezvous & SPSC ring buffer self-test passed");
+
+    // 11. Configure 64-bit Syscall / Sysret MSRs (STAR, LSTAR, FMASK, SCE)
+    syscall::init();
+    kprintln!("[CELEBRON-SYS] 64-bit syscall/sysret MSRs initialized (STAR, LSTAR, FMASK, swapgs)");
+
+    // 12. Initialize Ring-3 Userspace Task (TID 3 'uinit-task')
+    let user_info = userspace::init(&mut pmm, &mut vmm);
+    kprintln!(
+        "[CELEBRON-USER] Ring-3 userspace initialized: TID {} 'uinit-task' mapped & scheduled",
+        user_info.tid
+    );
+
+    // 13. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
     let apic_info = interrupts::init_apic_and_timer();
     let initial_ticks = interrupts::enable_interrupts_and_verify_timer();
     let initial_sched_stats = scheduler::stats();
+    let initial_syscall_stats = syscall::stats();
     kprintln!(
         "[CELEBRON-APIC] {} Timer Online (base=0x{:016X}, vec={}, initial_ticks={})",
         if apic_info.is_x2apic { "x2APIC" } else { "xAPIC" },
@@ -468,17 +526,26 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         &apic_info,
         &smp_info,
         &initial_sched_stats,
+        &initial_syscall_stats,
+        &user_info,
         initial_ticks,
     );
-    kprintln!("[CELEBRON-KERNEL] Milestone 1.4 Online (SMP & Preemptive Multitasking Active).");
+    kprintln!("[CELEBRON-KERNEL] Milestone 1.5 Online (Ring-3 Userspace, Capabilities & IPC Active).");
 
     let mut last_rendered_ticks = initial_ticks;
     loop {
         let now_ticks = interrupts::timer_ticks();
         if now_ticks.saturating_sub(last_rendered_ticks) >= 6 {
             let now_sched = scheduler::stats();
+            let now_syscall = syscall::stats();
             if let Some(ref coords) = live_coords {
-                render_live_scheduler_counters(boot_info, coords, now_ticks, &now_sched);
+                render_live_scheduler_counters(
+                    boot_info,
+                    coords,
+                    now_ticks,
+                    &now_sched,
+                    &now_syscall,
+                );
             }
             last_rendered_ticks = now_ticks;
         }

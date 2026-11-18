@@ -83,10 +83,10 @@ Run Automated Kernel Self-Tests & Inspect Serial Logs
 - [x] Add SMP (multi-core CPU) bring-up & ACPI MADT topology support.
 
 ### Milestone 1.5 — Userspace, Capabilities & IPC
-- [ ] Implement `syscall`/`sysret` transition to Ring 3 (userspace).
-- [ ] Build capability handle system (grant, revoke, restrict rights).
-- [ ] Implement fast IPC endpoints and shared-memory ring buffers.
-- [ ] Load and execute the first userspace `init` process (ELF or custom binary format).
+- [x] Implement `syscall`/`sysret` transition to Ring 3 (userspace).
+- [x] Build capability handle system (grant, revoke, restrict rights).
+- [x] Implement fast IPC endpoints and shared-memory ring buffers.
+- [x] Load and execute the first userspace `init` process (ELF or custom binary format).
 
 ### Milestone 1.6 — Driver Foundation (Bridge to Phase 2)
 - [ ] Implement PCIe bus enumeration and ACPI parsing.
