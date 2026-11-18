@@ -73,9 +73,9 @@ Run Automated Kernel Self-Tests & Inspect Serial Logs
 - [x] Implement kernel heap allocator (`alloc` support).
 
 ### Milestone 1.3 — Interrupts & Timing
-- [ ] Configure GDT, TSS, and IDT (CPU exceptions + double-fault stack).
-- [ ] Initialize Local APIC, IOAPIC, and hardware timer (HPET / APIC timer).
-- [ ] Verify clean interrupt handling and timer ticks.
+- [x] Configure GDT, TSS, and IDT (CPU exceptions + double-fault stack).
+- [x] Initialize Local APIC, 8259 PIC masking, and hardware timer (periodic APIC timer).
+- [x] Verify clean interrupt handling (`#BP` `int3` trap) and live timer ticks.
 
 ### Milestone 1.4 — Multitasking & Scheduling
 - [ ] Implement kernel threads and context switching.

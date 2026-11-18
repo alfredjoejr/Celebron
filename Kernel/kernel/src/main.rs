@@ -4,7 +4,10 @@
 extern crate alloc;
 
 mod font;
+mod gdt;
 mod heap;
+mod idt;
+mod interrupts;
 mod pmm;
 mod serial;
 mod vmm;
@@ -17,19 +20,23 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 use font::{pack_rgb, FramebufferCanvas};
 use heap::HeapStats;
+use interrupts::ApicInfo;
 use pmm::PmmStats;
 use vmm::VirtualMemoryManager;
 
 /// Render the Celebron OS Ring-0 Pure Microkernel visual boot dashboard onto the UEFI GOP framebuffer.
+/// Returns the `(x, y)` coordinates of the live tick counter if a framebuffer is active.
 fn render_boot_dashboard(
     boot_info: &BootInfo,
     pmm_stats: &PmmStats,
     vmm: &VirtualMemoryManager,
     heap_stats: &HeapStats,
     alloc_test_addr: u64,
-) {
+    apic_info: &ApicInfo,
+    initial_ticks: u64,
+) -> Option<(usize, usize)> {
     if boot_info.has_framebuffer == 0 {
-        return;
+        return None;
     }
 
     let fb = boot_info.framebuffer;
@@ -61,7 +68,7 @@ fn render_boot_dashboard(
     );
 
     // 3. Telemetry panel
-    let body_h = fb.height.saturating_sub(200).min(460);
+    let body_h = fb.height.saturating_sub(200).min(480);
     canvas.fill_rect(40, 156, card_w, body_h, panel_bg);
     canvas.fill_rect(40, 156, 8, body_h, status_green);
 
@@ -128,16 +135,55 @@ fn render_boot_dashboard(
     // Row 7: Alloc self-test verification
     x = canvas.draw_str(68, y, "[OK] ALLOC SELF-TEST: BOX/VEC(64)/STRING OK @ ", status_green, 1);
     canvas.draw_u64_hex(x, y, alloc_test_addr, accent_cyan, 1);
-    y += line_step + 16;
+    y += line_step;
 
-    // Row 8: Active milestone status
+    // Row 8: GDT / TSS / IDT verification
     canvas.draw_str(
         68,
         y,
-        "STATUS: MILESTONE 1.2 ONLINE - PMM, VMM & KERNEL HEAP ACTIVE",
+        "[OK] GDT/TSS/IDT: CS=0X08 TSS=0X28 (IST1 #DF) | #BP INT3 TEST PASSED",
+        status_green,
+        1,
+    );
+    y += line_step;
+
+    // Row 9: Local APIC Timer & Live Ticks
+    let mode_label = if apic_info.is_x2apic {
+        "X2APIC"
+    } else {
+        "XAPIC"
+    };
+    x = canvas.draw_str(68, y, "[OK] LOCAL APIC TIMER (VEC 32): ", status_green, 1);
+    x = canvas.draw_str(x, y, mode_label, text_white, 1);
+    let tick_x = canvas.draw_str(x, y, " ONLINE | LIVE TICKS: ", text_muted, 1);
+    let tick_y = y;
+    canvas.draw_u64_dec(tick_x, tick_y, initial_ticks, accent_cyan, 1);
+    y += line_step + 16;
+
+    // Row 10: Active milestone status
+    canvas.draw_str(
+        68,
+        y,
+        "STATUS: MILESTONE 1.3 ONLINE - GDT, TSS, IDT & APIC TIMER ACTIVE",
         accent_cyan,
         1,
     );
+
+    Some((tick_x, tick_y))
+}
+
+/// Update only the numeric tick counter on the GOP dashboard without full-screen flicker.
+fn render_live_tick_counter(boot_info: &BootInfo, tick_x: usize, tick_y: usize, ticks: u64) {
+    if boot_info.has_framebuffer == 0 {
+        return;
+    }
+    let fb = boot_info.framebuffer;
+    let canvas = FramebufferCanvas::new(fb);
+    let panel_bg = pack_rgb(0x13, 0x1C, 0x2E, fb.format);
+    let accent_cyan = pack_rgb(0x00, 0xD4, 0xFF, fb.format);
+
+    canvas.fill_rect(tick_x, tick_y, 200, 18, panel_bg);
+    canvas.draw_u64_dec(tick_x, tick_y, ticks, accent_cyan, 1);
 }
 
 /// Celebron OS Pure Microkernel Ring-0 Entry Point (`kernel_main`).
@@ -294,22 +340,60 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         heap_stats_after_drop.free_bytes / 1024
     );
 
+    // 6. Initialize 64-bit GDT & TSS (`RSP0` + `IST1` Double-Fault stack)
+    gdt::init();
+    kprintln!(
+        "[CELEBRON-GDT] Loaded 64-bit GDT & TSS (CS=0x{:02X}, DS=0x{:02X}, TR=0x{:02X}, IST1=#DF)",
+        gdt::KERNEL_CODE_SELECTOR,
+        gdt::KERNEL_DATA_SELECTOR,
+        gdt::TSS_SELECTOR
+    );
+
+    // 7. Initialize 64-bit IDT & verify `#BP` (int3) trap handling
+    idt::init();
+    let bp_count = idt::run_breakpoint_self_test();
+    kprintln!(
+        "[CELEBRON-IDT] 256-gate IDT active; #BP int3 self-test passed (count={})",
+        bp_count
+    );
+
+    // 8. Mask 8259 PIC, start Local APIC periodic timer (Vec 32), and enable interrupts (`sti`)
+    let apic_info = interrupts::init_apic_and_timer();
+    let initial_ticks = interrupts::enable_interrupts_and_verify_timer();
+    kprintln!(
+        "[CELEBRON-APIC] {} Timer Online (base=0x{:016X}, vec={}, initial_ticks={})",
+        if apic_info.is_x2apic { "x2APIC" } else { "xAPIC" },
+        apic_info.base_addr,
+        interrupts::TIMER_INTERRUPT_VECTOR,
+        initial_ticks
+    );
+
     let pmm_final_stats = pmm.stats();
     kprintln!(
         "[CELEBRON-PMM] Final allocation state: {} used frames, {} free frames remaining",
         pmm_final_stats.used_frames,
         pmm_final_stats.free_frames
     );
-    render_boot_dashboard(
+    let tick_coords = render_boot_dashboard(
         boot_info,
         &pmm_final_stats,
         &vmm,
         &heap_stats_live,
         alloc_test_addr,
+        &apic_info,
+        initial_ticks,
     );
-    kprintln!("[CELEBRON-KERNEL] Milestone 1.2 Online (PMM, VMM & Kernel Heap Active). Halting CPU cleanly.");
+    kprintln!("[CELEBRON-KERNEL] Milestone 1.3 Online (GDT, TSS, IDT & Local APIC Timer Active).");
 
+    let mut last_rendered_ticks = initial_ticks;
     loop {
+        let now_ticks = interrupts::timer_ticks();
+        if now_ticks.saturating_sub(last_rendered_ticks) >= 10 {
+            if let Some((tx, ty)) = tick_coords {
+                render_live_tick_counter(boot_info, tx, ty, now_ticks);
+            }
+            last_rendered_ticks = now_ticks;
+        }
         unsafe {
             asm!("hlt", options(nomem, nostack, preserves_flags));
         }
