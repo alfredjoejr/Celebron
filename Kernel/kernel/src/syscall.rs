@@ -4,9 +4,9 @@
 //! and dispatches userspace microkernel requests.
 
 use crate::capability::{
-    CapError, CapRights, CapType, Capability, CapabilityTable, CAP_DRV_DMA, CAP_DRV_IRQ,
-    CAP_DRV_MMIO, CAP_IPC_ENDPOINT_INIT, CAP_MEM_SHARED, CAP_SYS_CONSOLE, CAP_SYS_INFO,
-    CAP_SYS_POWER,
+    CapError, CapRights, CapType, Capability, CapabilityTable, CAP_BLK_DEV, CAP_DRV_DMA,
+    CAP_DRV_IRQ, CAP_DRV_MMIO, CAP_IPC_ENDPOINT_INIT, CAP_MEM_SHARED, CAP_SYS_CONSOLE,
+    CAP_SYS_INFO, CAP_SYS_POWER,
 };
 use crate::gdt::KERNEL_CODE_SELECTOR;
 use crate::interrupts;
@@ -29,6 +29,9 @@ pub const SYS_DRIVER_MMIO_READ: u64 = 11;
 pub const SYS_DRIVER_MMIO_WRITE: u64 = 12;
 pub const SYS_DRIVER_DMA_INFO: u64 = 13;
 pub const SYS_DRIVER_IRQ_ACK: u64 = 14;
+pub const SYS_BLK_INFO: u64 = 15;
+pub const SYS_BLK_READ: u64 = 16;
+pub const SYS_BLK_WRITE: u64 = 17;
 
 pub const RET_SUCCESS: u64 = 0;
 pub const ERR_INVALID_SYSCALL: u64 = 1;
@@ -37,6 +40,7 @@ pub const ERR_CAP_PERM_DENIED: u64 = 3;
 pub const ERR_INVALID_ARG: u64 = 4;
 pub const ERR_IPC_CHANNEL_FULL: u64 = 5;
 pub const ERR_IPC_NO_MESSAGE: u64 = 6;
+pub const ERR_IO_ERROR: u64 = 7;
 
 const IA32_EFER_MSR: u32 = 0xC000_0080;
 const IA32_STAR_MSR: u32 = 0xC000_0081;
@@ -392,7 +396,89 @@ pub extern "sysv64" fn rust_syscall_dispatch(
             }
         }
 
+        SYS_BLK_INFO => {
+            let cap_handle = a1 as u32;
+            match table.verify(cap_handle, CapRights::READ) {
+                Ok(cap) => {
+                    if cap.cap_type != CapType::BlockDevice {
+                        return ERR_CAP_PERM_DENIED;
+                    }
+                    cap.object_id
+                }
+                Err(CapError::PermissionDenied) => ERR_CAP_PERM_DENIED,
+                Err(_) => ERR_CAP_INVALID,
+            }
+        }
+
+        SYS_BLK_READ => dispatch_block_io(table, a1 as u32, a2, a3, a4, false),
+
+        SYS_BLK_WRITE => dispatch_block_io(table, a1 as u32, a2, a3, a4, true),
+
         _ => ERR_INVALID_SYSCALL,
+    }
+}
+
+/// Shared validator and dispatcher for partition-scoped `SYS_BLK_READ` and `SYS_BLK_WRITE`.
+fn dispatch_block_io(
+    table: &CapabilityTable,
+    cap_handle: u32,
+    rel_lba: u64,
+    user_buf: u64,
+    count: u64,
+    is_write: bool,
+) -> u64 {
+    if count == 0 || count > 8 || user_buf == 0 {
+        return ERR_INVALID_ARG;
+    }
+    let byte_len = (count as usize) * 512;
+    let valid_user_range = user_buf
+        .checked_add(byte_len as u64)
+        .is_some_and(|end| end < 0x0000_8000_0000_0000);
+    if !valid_user_range {
+        return ERR_INVALID_ARG;
+    }
+
+    let req_right = if is_write {
+        CapRights::WRITE
+    } else {
+        CapRights::READ
+    };
+    let cap = match table.verify(cap_handle, req_right) {
+        Ok(c) => c,
+        Err(CapError::PermissionDenied) => return ERR_CAP_PERM_DENIED,
+        Err(_) => return ERR_CAP_INVALID,
+    };
+    if cap.cap_type != CapType::BlockDevice {
+        return ERR_CAP_PERM_DENIED;
+    }
+
+    let res = unsafe {
+        if is_write {
+            let buf = core::slice::from_raw_parts(user_buf as *const u8, byte_len);
+            crate::storage::write_cfs_sectors(rel_lba, count as u16, buf)
+        } else {
+            let buf = core::slice::from_raw_parts_mut(user_buf as *mut u8, byte_len);
+            crate::storage::read_cfs_sectors(rel_lba, count as u16, buf)
+        }
+    };
+
+    match res {
+        Ok(()) => RET_SUCCESS,
+        Err(_) => ERR_IO_ERROR,
+    }
+}
+
+/// Grant capability-gated access scoped strictly to the `CelebronFS CoW Root` partition.
+pub fn grant_block_capability(partition_sectors: u64) {
+    unsafe {
+        let table = &mut *addr_of_mut!(ACTIVE_CAP_TABLE);
+        let blk_cap = Capability::new(
+            CapType::BlockDevice,
+            CapRights::READ | CapRights::WRITE | CapRights::GRANT,
+            partition_sectors,
+            0xB10C,
+        );
+        let _ = table.insert_at(CAP_BLK_DEV as usize, blk_cap);
     }
 }
 

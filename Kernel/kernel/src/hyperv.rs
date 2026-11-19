@@ -67,6 +67,8 @@ const VMBUS_RING_VIRT_STRIDE: u64 = 0x10000; // 64 KiB per channel slot
 
 // VMBus Ring Packet Types & Flags
 const VM_PKT_DATA_INBAND: u16 = 6;
+const VM_PKT_DATA_USING_GPA_DIRECT: u16 = 9;
+const VM_PKT_COMP: u16 = 11;
 const VM_PKT_FLAG_COMPLETION_REQ: u16 = 1;
 
 // IC Message Types & Flags
@@ -83,6 +85,30 @@ const SYNTH_KBD_EVENT: u32 = 3;
 const SYNTH_KBD_VERSION_WIN8: u32 = 1 << 16;
 const KEYSTROKE_IS_BREAK: u32 = 1 << 1;
 
+// StorVSP (Synthetic SCSI) Protocol Constants
+const VSTOR_OP_COMPLETE_IO: u32 = 1;
+const VSTOR_OP_EXECUTE_SRB: u32 = 3;
+const VSTOR_OP_BEGIN_INIT: u32 = 7;
+const VSTOR_OP_END_INIT: u32 = 8;
+const VSTOR_OP_QUERY_PROTOCOL_VERSION: u32 = 9;
+const VSTOR_OP_QUERY_PROPERTIES: u32 = 10;
+
+const VSTOR_VERSION_THRESHOLD: u16 = 0x0602;
+const VSTOR_VERSION_BLUE: u16 = 0x0600;
+const VSTOR_VERSION_WIN8: u16 = 0x0501;
+
+const VSTOR_PACKET_SIZE: usize = 64;
+const VSTOR_FLAG_REQUEST_COMPLETION: u32 = 1;
+
+const SCSI_IOCTL_DATA_OUT: u8 = 0;
+const SCSI_IOCTL_DATA_IN: u8 = 1;
+const SCSI_IOCTL_DATA_UNSPECIFIED: u8 = 2;
+
+const SRB_STATUS_MASK: u8 = 0x3F;
+const SRB_STATUS_SUCCESS: u8 = 0x01;
+const SRB_FLAGS_DATA_IN: u32 = 0x0000_0040;
+const SRB_FLAGS_DATA_OUT: u32 = 0x0000_0080;
+
 // Microsoft Mixed-Endian VMBus Interface GUIDs
 /// Shutdown IC: `{0e0b6031-5213-4934-818b-38d90ced39db}`
 const GUID_SHUTDOWN_IC: [u8; 16] = [
@@ -95,6 +121,10 @@ const GUID_HEARTBEAT_IC: [u8; 16] = [
 /// Synthetic Keyboard: `{f912ad6d-2b17-48ea-bd65-f927a61c7684}`
 const GUID_SYNTH_KEYBOARD: [u8; 16] = [
     0x6d, 0xad, 0x12, 0xf9, 0x17, 0x2b, 0xea, 0x48, 0xbd, 0x65, 0xf9, 0x27, 0xa6, 0x1c, 0x76, 0x84,
+];
+/// Synthetic SCSI Controller (StorVSC): `{ba6163d9-04a1-4d29-b605-72e2ffb1dc7f}`
+const GUID_SCSI_STORVSC: [u8; 16] = [
+    0xd9, 0x63, 0x61, 0xba, 0xa1, 0x04, 0x29, 0x4d, 0xb6, 0x05, 0x72, 0xe2, 0xff, 0xb1, 0xdc, 0x7f,
 ];
 
 #[repr(C, packed)]
@@ -155,6 +185,125 @@ struct IcMsgHdr {
 
 const _: () = assert!(core::mem::size_of::<IcMsgHdr>() == 20);
 
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct GpaDirectHeader {
+    reserved: u32,
+    range_count: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<GpaDirectHeader>() == 8);
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct GpaRange {
+    byte_count: u32,
+    byte_offset: u32,
+    pfn: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<GpaRange>() == 16);
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct ScsiRequest {
+    length: u16,
+    srb_status: u8,
+    scsi_status: u8,
+    reserved1: u8,
+    path_id: u8,
+    target_id: u8,
+    lun: u8,
+    cdb_length: u8,
+    sense_info_ex_length: u8,
+    data_in: u8,
+    properties: u8,
+    data_transfer_length: u32,
+    payload: [u8; 20],
+    reserve: u16,
+    queue_tag: u8,
+    queue_action: u8,
+    srb_flags: u32,
+    time_out_value: u32,
+    queue_sort_key: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<ScsiRequest>() == 52);
+
+impl ScsiRequest {
+    const fn zeroed() -> Self {
+        Self {
+            length: 0,
+            srb_status: 0,
+            scsi_status: 0,
+            reserved1: 0,
+            path_id: 0,
+            target_id: 0,
+            lun: 0,
+            cdb_length: 0,
+            sense_info_ex_length: 0,
+            data_in: 0,
+            properties: 0,
+            data_transfer_length: 0,
+            payload: [0; 20],
+            reserve: 0,
+            queue_tag: 0,
+            queue_action: 0,
+            srb_flags: 0,
+            time_out_value: 0,
+            queue_sort_key: 0,
+        }
+    }
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct VstorPacket {
+    operation: u32,
+    flags: u32,
+    status: u32,
+    body: ScsiRequest,
+}
+
+const _: () = assert!(core::mem::size_of::<VstorPacket>() == VSTOR_PACKET_SIZE);
+
+impl VstorPacket {
+    const fn new(operation: u32, flags: u32) -> Self {
+        Self {
+            operation,
+            flags,
+            status: 0,
+            body: ScsiRequest::zeroed(),
+        }
+    }
+
+    unsafe fn as_bytes(&self) -> &[u8; VSTOR_PACKET_SIZE] {
+        &*(self as *const Self as *const [u8; VSTOR_PACKET_SIZE])
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StorVscDiskInfo {
+    pub online: bool,
+    pub lun: u8,
+    pub sector_size: u32,
+    pub sector_count: u64,
+    #[allow(dead_code)]
+    pub proto_version: u16,
+}
+
+impl StorVscDiskInfo {
+    pub const fn offline() -> Self {
+        Self {
+            online: false,
+            lun: 0,
+            sector_size: 512,
+            sector_count: 0,
+            proto_version: 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct VmbusChannel {
     offered: bool,
@@ -196,6 +345,10 @@ struct HyperVState {
     shutdown_ch: VmbusChannel,
     heartbeat_ch: VmbusChannel,
     keyboard_ch: VmbusChannel,
+    storvsc_ch: VmbusChannel,
+    stor_dma_page: u64,
+    stor_tx_seq: u64,
+    stor_disk: StorVscDiskInfo,
 }
 
 static mut HV_STATE: HyperVState = HyperVState {
@@ -210,6 +363,10 @@ static mut HV_STATE: HyperVState = HyperVState {
     shutdown_ch: VmbusChannel::empty(),
     heartbeat_ch: VmbusChannel::empty(),
     keyboard_ch: VmbusChannel::empty(),
+    storvsc_ch: VmbusChannel::empty(),
+    stor_dma_page: 0,
+    stor_tx_seq: 1,
+    stor_disk: StorVscDiskInfo::offline(),
 };
 
 static SYNIC_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -224,6 +381,7 @@ pub struct HyperVStatus {
     pub shutdown_ic_ready: bool,
     pub heartbeat_ic_ready: bool,
     pub synth_kbd_ready: bool,
+    pub storvsc_disk: StorVscDiskInfo,
 }
 
 impl HyperVStatus {
@@ -235,6 +393,7 @@ impl HyperVStatus {
             shutdown_ic_ready: false,
             heartbeat_ic_ready: false,
             synth_kbd_ready: false,
+            storvsc_disk: StorVscDiskInfo::offline(),
         }
     }
 }
@@ -425,8 +584,11 @@ unsafe fn ring_zero(ring_virt: u64, start_offset: usize, len: usize) {
 }
 
 /// Read one packet from a channel's Host->Guest Receive Ring Buffer.
-/// Returns `Some((payload_len, transaction_id))`.
-unsafe fn ring_recv_packet(ch: &VmbusChannel, out_payload: &mut [u8]) -> Option<(usize, u64)> {
+/// Returns `Some((packet_type, payload_len, transaction_id))`.
+unsafe fn ring_recv_packet_typed(
+    ch: &VmbusChannel,
+    out_payload: &mut [u8],
+) -> Option<(u16, usize, u64)> {
     if !ch.open || ch.recv_ring_virt == 0 {
         return None;
     }
@@ -462,17 +624,31 @@ unsafe fn ring_recv_packet(ch: &VmbusChannel, out_payload: &mut [u8]) -> Option<
     let new_read_idx = (read_idx + total_pkt_len + 8) % RING_DATA_SIZE;
     ring_ctrl_u32(ch.recv_ring_virt, 1).store(new_read_idx as u32, Ordering::Release);
 
-    Some((copy_len, desc.transaction_id))
+    Some((desc.packet_type, copy_len, desc.transaction_id))
 }
 
-/// Write one in-band packet to a channel's Guest->Host Send Ring Buffer and signal host.
-unsafe fn ring_send_packet(ch: &VmbusChannel, payload: &[u8], trans_id: u64, req_completion: bool) -> bool {
+/// Read one packet from a channel's Host->Guest Receive Ring Buffer.
+/// Returns `Some((payload_len, transaction_id))`.
+unsafe fn ring_recv_packet(ch: &VmbusChannel, out_payload: &mut [u8]) -> Option<(usize, u64)> {
+    ring_recv_packet_typed(ch, out_payload).map(|(_, len, tx)| (len, tx))
+}
+
+/// Common writer helper for in-band and GPA-direct VMBus ring packets.
+unsafe fn ring_write_frame(
+    ch: &VmbusChannel,
+    packet_type: u16,
+    header_extra: &[u8],
+    payload: &[u8],
+    trans_id: u64,
+    req_completion: bool,
+) -> bool {
     if !ch.open || ch.send_ring_virt == 0 {
         return false;
     }
 
+    let hdr_total = 16 + header_extra.len();
     let padded_payload_len = (payload.len() + 7) & !7;
-    let msg_len = 16 + padded_payload_len;
+    let msg_len = hdr_total + padded_payload_len;
     let total_bytes = msg_len + 8; // + 8-byte footer
 
     let old_write_idx = ring_ctrl_u32(ch.send_ring_virt, 0).load(Ordering::Relaxed) as usize;
@@ -488,8 +664,8 @@ unsafe fn ring_send_packet(ch: &VmbusChannel, payload: &[u8], trans_id: u64, req
     }
 
     let desc = PacketDescriptor {
-        packet_type: VM_PKT_DATA_INBAND,
-        data_offset8: 2, // 16 / 8
+        packet_type,
+        data_offset8: (hdr_total / 8) as u16,
         length8: (msg_len / 8) as u16,
         flags: if req_completion {
             VM_PKT_FLAG_COMPLETION_REQ
@@ -502,11 +678,18 @@ unsafe fn ring_send_packet(ch: &VmbusChannel, payload: &[u8], trans_id: u64, req
     let desc_bytes =
         core::slice::from_raw_parts((&desc as *const PacketDescriptor) as *const u8, 16);
     ring_copy_to(ch.send_ring_virt, old_write_idx, desc_bytes);
-    ring_copy_to(ch.send_ring_virt, old_write_idx + 16, payload);
+    if !header_extra.is_empty() {
+        ring_copy_to(ch.send_ring_virt, old_write_idx + 16, header_extra);
+    }
+    ring_copy_to(ch.send_ring_virt, old_write_idx + hdr_total, payload);
 
     let pad_bytes = padded_payload_len - payload.len();
     if pad_bytes > 0 {
-        ring_zero(ch.send_ring_virt, old_write_idx + 16 + payload.len(), pad_bytes);
+        ring_zero(
+            ch.send_ring_virt,
+            old_write_idx + hdr_total + payload.len(),
+            pad_bytes,
+        );
     }
 
     // 8-byte VMBus Ring Footer: { reserved: u32 = 0, offset: u32 = old_write_idx }
@@ -525,6 +708,50 @@ unsafe fn ring_send_packet(ch: &VmbusChannel, payload: &[u8], trans_id: u64, req
     // Signal host via Hyper-V Fast HvCallSignalEvent
     hv_signal_event(ch.connection_id);
     true
+}
+
+/// Write one in-band packet to a channel's Guest->Host Send Ring Buffer and signal host.
+unsafe fn ring_send_packet(
+    ch: &VmbusChannel,
+    payload: &[u8],
+    trans_id: u64,
+    req_completion: bool,
+) -> bool {
+    ring_write_frame(ch, VM_PKT_DATA_INBAND, &[], payload, trans_id, req_completion)
+}
+
+/// Write one single-range GPA-Direct packet (`VM_PKT_DATA_USING_GPA_DIRECT`) and signal host.
+unsafe fn ring_send_gpa_direct_packet(
+    ch: &VmbusChannel,
+    gpa_phys: u64,
+    byte_count: u32,
+    payload: &[u8],
+    trans_id: u64,
+) -> bool {
+    let hdr = GpaDirectHeader {
+        reserved: 0,
+        range_count: 1,
+    };
+    let range = GpaRange {
+        byte_count,
+        byte_offset: 0,
+        pfn: gpa_phys / PAGE_SIZE,
+    };
+    let mut extra = [0u8; 24];
+    let hdr_bytes =
+        core::slice::from_raw_parts((&hdr as *const GpaDirectHeader) as *const u8, 8);
+    let rng_bytes = core::slice::from_raw_parts((&range as *const GpaRange) as *const u8, 16);
+    extra[0..8].copy_from_slice(hdr_bytes);
+    extra[8..24].copy_from_slice(rng_bytes);
+
+    ring_write_frame(
+        ch,
+        VM_PKT_DATA_USING_GPA_DIRECT,
+        &extra,
+        payload,
+        trans_id,
+        true,
+    )
 }
 
 // ============================================================================
@@ -885,6 +1112,304 @@ unsafe fn poll_keyboard_channel(ch: &mut VmbusChannel) {
     }
 }
 
+// ============================================================================
+// Hyper-V VMBus Synthetic SCSI (`StorVSC`) Block Driver
+// ============================================================================
+
+unsafe fn storvsc_next_tx() -> u64 {
+    let st = &mut *addr_of_mut!(HV_STATE);
+    let tx = st.stor_tx_seq;
+    st.stor_tx_seq = st.stor_tx_seq.wrapping_add(1);
+    tx
+}
+
+/// Poll the StorVSC receive ring buffer until a `VM_PKT_COMP` matches `expected_tx`.
+unsafe fn storvsc_wait_completion(expected_tx: u64, out_buf: &mut [u8; VSTOR_PACKET_SIZE]) -> bool {
+    let st = &*addr_of_mut!(HV_STATE);
+    let mut tmp = [0u8; 128];
+
+    for _ in 0..12_000_000u64 {
+        clear_siefp_bit(st.siefp_page, st.storvsc_ch.channel_id);
+        if let Some((pkt_type, len, tx_id)) = ring_recv_packet_typed(&st.storvsc_ch, &mut tmp) {
+            if pkt_type == VM_PKT_COMP && tx_id == expected_tx && len >= 12 {
+                let copy_len = len.min(VSTOR_PACKET_SIZE);
+                out_buf.fill(0);
+                out_buf[..copy_len].copy_from_slice(&tmp[..copy_len]);
+                return true;
+            }
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+/// Issue a synchronous StorVSP control request (`BEGIN_INIT`, `QUERY_PROTOCOL_VERSION`,
+/// `QUERY_PROPERTIES`, or `END_INIT`) and return its `NtStatus`.
+unsafe fn storvsc_send_ctl(op: u32, proto_ver: Option<u16>) -> Option<u32> {
+    let st = &*addr_of_mut!(HV_STATE);
+    let mut pkt = VstorPacket::new(op, VSTOR_FLAG_REQUEST_COMPLETION);
+    if let Some(ver) = proto_ver {
+        // `ProtocolVersion { major_minor: u16, reserved: u16 }` overlays bytes 12..16.
+        pkt.body.length = ver;
+    }
+
+    let tx = storvsc_next_tx();
+    if !ring_send_packet(&st.storvsc_ch, pkt.as_bytes(), tx, true) {
+        return None;
+    }
+
+    let mut resp = [0u8; VSTOR_PACKET_SIZE];
+    if !storvsc_wait_completion(tx, &mut resp) {
+        return None;
+    }
+    Some(u32::from_le_bytes([resp[8], resp[9], resp[10], resp[11]]))
+}
+
+/// Issue a single synchronous SCSI SRB via `VSTOR_OP_EXECUTE_SRB`.
+unsafe fn storvsc_exec_srb(
+    lun: u8,
+    cdb: &[u8],
+    data_in: u8,
+    xfer_len: u32,
+    use_dma: bool,
+) -> Result<(), &'static str> {
+    let st = &*addr_of_mut!(HV_STATE);
+    if !st.storvsc_ch.open || cdb.len() > 16 {
+        return Err("StorVSC channel not open or invalid CDB");
+    }
+
+    let mut pkt = VstorPacket::new(VSTOR_OP_EXECUTE_SRB, VSTOR_FLAG_REQUEST_COMPLETION);
+    pkt.body.length = core::mem::size_of::<ScsiRequest>() as u16; // 0x34 (52 bytes)
+    pkt.body.path_id = 0;
+    pkt.body.target_id = 0;
+    pkt.body.lun = lun;
+    pkt.body.cdb_length = cdb.len() as u8;
+    pkt.body.sense_info_ex_length = 0x14;
+    pkt.body.data_in = data_in;
+    pkt.body.data_transfer_length = xfer_len;
+    pkt.body.payload[..cdb.len()].copy_from_slice(cdb);
+    pkt.body.srb_flags = match data_in {
+        SCSI_IOCTL_DATA_IN => SRB_FLAGS_DATA_IN,
+        SCSI_IOCTL_DATA_OUT => SRB_FLAGS_DATA_OUT,
+        _ => 0,
+    };
+    pkt.body.time_out_value = 60;
+
+    let tx = storvsc_next_tx();
+    let sent = if use_dma && xfer_len > 0 {
+        ring_send_gpa_direct_packet(&st.storvsc_ch, st.stor_dma_page, xfer_len, pkt.as_bytes(), tx)
+    } else {
+        ring_send_packet(&st.storvsc_ch, pkt.as_bytes(), tx, true)
+    };
+    if !sent {
+        return Err("StorVSC ring send failed");
+    }
+
+    let mut resp = [0u8; VSTOR_PACKET_SIZE];
+    if !storvsc_wait_completion(tx, &mut resp) {
+        return Err("StorVSC completion timeout");
+    }
+
+    let op = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+    let nt_status = u32::from_le_bytes([resp[8], resp[9], resp[10], resp[11]]);
+    let srb_status = resp[14];
+    let scsi_status = resp[15];
+
+    if op != VSTOR_OP_COMPLETE_IO || nt_status != 0 {
+        return Err("StorVSC packet failed");
+    }
+    if (srb_status & SRB_STATUS_MASK) != SRB_STATUS_SUCCESS || scsi_status != 0 {
+        return Err("StorVSC SCSI SRB status error");
+    }
+    Ok(())
+}
+
+/// Run the StorVSP initialization sequence and probe LUNs `0..4` via `READ CAPACITY(10)`.
+unsafe fn storvsc_handshake_and_probe() -> StorVscDiskInfo {
+    let st = &*addr_of_mut!(HV_STATE);
+    if !st.storvsc_ch.open || st.stor_dma_page == 0 {
+        return StorVscDiskInfo::offline();
+    }
+
+    // Step A: BEGIN_INITIALIZATION
+    if storvsc_send_ctl(VSTOR_OP_BEGIN_INIT, None) != Some(0) {
+        crate::kprintln!("[CELEBRON-HV] StorVSC BEGIN_INITIALIZATION failed");
+        return StorVscDiskInfo::offline();
+    }
+
+    // Step B: QUERY_PROTOCOL_VERSION
+    let mut negotiated_proto = 0u16;
+    for &ver in &[
+        VSTOR_VERSION_THRESHOLD,
+        VSTOR_VERSION_BLUE,
+        VSTOR_VERSION_WIN8,
+    ] {
+        if storvsc_send_ctl(VSTOR_OP_QUERY_PROTOCOL_VERSION, Some(ver)) == Some(0) {
+            negotiated_proto = ver;
+            break;
+        }
+    }
+    if negotiated_proto == 0 {
+        crate::kprintln!("[CELEBRON-HV] StorVSC QUERY_PROTOCOL_VERSION failed");
+        return StorVscDiskInfo::offline();
+    }
+
+    // Step C: QUERY_PROPERTIES
+    if storvsc_send_ctl(VSTOR_OP_QUERY_PROPERTIES, None) != Some(0) {
+        crate::kprintln!("[CELEBRON-HV] StorVSC QUERY_PROPERTIES failed");
+        return StorVscDiskInfo::offline();
+    }
+
+    // Step D: END_INITIALIZATION
+    if storvsc_send_ctl(VSTOR_OP_END_INIT, None) != Some(0) {
+        crate::kprintln!("[CELEBRON-HV] StorVSC END_INITIALIZATION failed");
+        return StorVscDiskInfo::offline();
+    }
+
+    // Step E: Scan LUN 0..4 with TEST UNIT READY + READ CAPACITY(10)
+    let tur_cdb = [0u8; 6];
+    let cap_cdb = [0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    for lun in 0u8..4 {
+        // Clear any initial UNIT ATTENTION before issuing READ CAPACITY(10)
+        for _ in 0..2 {
+            let _ = storvsc_exec_srb(lun, &tur_cdb, SCSI_IOCTL_DATA_UNSPECIFIED, 0, false);
+        }
+
+        core::ptr::write_bytes(st.stor_dma_page as *mut u8, 0, 8);
+        fence(Ordering::SeqCst);
+
+        if storvsc_exec_srb(lun, &cap_cdb, SCSI_IOCTL_DATA_IN, 8, true).is_ok() {
+            fence(Ordering::Acquire);
+            let b = core::slice::from_raw_parts(st.stor_dma_page as *const u8, 8);
+            let last_lba = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            let blk_len = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+            if blk_len == 512 && last_lba > 0 {
+                let sector_count = (last_lba as u64) + 1;
+                crate::kprintln!(
+                    "[CELEBRON-HV] StorVSC SCSI LUN {} online: {} sectors x {} B ({} MiB, proto=0x{:04X})",
+                    lun,
+                    sector_count,
+                    blk_len,
+                    (sector_count * (blk_len as u64)) / (1024 * 1024),
+                    negotiated_proto
+                );
+                return StorVscDiskInfo {
+                    online: true,
+                    lun,
+                    sector_size: blk_len,
+                    sector_count,
+                    proto_version: negotiated_proto,
+                };
+            }
+        }
+    }
+
+    crate::kprintln!("[CELEBRON-HV] StorVSC handshake OK but no 512-byte LUN found");
+    StorVscDiskInfo::offline()
+}
+
+/// Shared chunked SCSI READ(10)/WRITE(10) transfer engine capped at 8 sectors (4 KiB) per SRB.
+unsafe fn storvsc_transfer(
+    lba: u64,
+    count: u16,
+    is_write: bool,
+    read_dst: Option<&mut [u8]>,
+    write_src: Option<&[u8]>,
+) -> Result<(), &'static str> {
+    let st = &*addr_of_mut!(HV_STATE);
+    if !st.stor_disk.online || st.stor_dma_page == 0 {
+        return Err("StorVSC disk offline");
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    let total_bytes = (count as usize) * 512;
+    let end_lba = lba
+        .checked_add(count as u64)
+        .ok_or("StorVSC LBA overflow")?;
+    if end_lba > st.stor_disk.sector_count || end_lba > u32::MAX as u64 {
+        return Err("StorVSC LBA out of bounds");
+    }
+    if let Some(ref dst) = read_dst {
+        if dst.len() < total_bytes {
+            return Err("StorVSC read buffer too small");
+        }
+    }
+    if let Some(src) = write_src {
+        if src.len() < total_bytes {
+            return Err("StorVSC write buffer too small");
+        }
+    }
+
+    let mut read_dst = read_dst;
+    let mut cur_lba = lba;
+    let mut rem = count;
+    let mut byte_off = 0usize;
+
+    while rem > 0 {
+        let chunk = rem.min(8);
+        let chunk_bytes = (chunk as usize) * 512;
+        let lba_be = (cur_lba as u32).to_be_bytes();
+        let cnt_be = chunk.to_be_bytes();
+        let opcode = if is_write { 0x2Au8 } else { 0x28u8 };
+        let cdb = [
+            opcode, 0, lba_be[0], lba_be[1], lba_be[2], lba_be[3], 0, cnt_be[0], cnt_be[1], 0,
+        ];
+
+        if is_write {
+            let src = write_src.ok_or("Missing write buffer")?;
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr().add(byte_off),
+                st.stor_dma_page as *mut u8,
+                chunk_bytes,
+            );
+            fence(Ordering::Release);
+            storvsc_exec_srb(
+                st.stor_disk.lun,
+                &cdb,
+                SCSI_IOCTL_DATA_OUT,
+                chunk_bytes as u32,
+                true,
+            )?;
+        } else {
+            core::ptr::write_bytes(st.stor_dma_page as *mut u8, 0, chunk_bytes);
+            fence(Ordering::SeqCst);
+            storvsc_exec_srb(
+                st.stor_disk.lun,
+                &cdb,
+                SCSI_IOCTL_DATA_IN,
+                chunk_bytes as u32,
+                true,
+            )?;
+            fence(Ordering::Acquire);
+            if let Some(ref mut dst) = read_dst {
+                core::ptr::copy_nonoverlapping(
+                    st.stor_dma_page as *const u8,
+                    dst.as_mut_ptr().add(byte_off),
+                    chunk_bytes,
+                );
+            }
+        }
+
+        cur_lba += chunk as u64;
+        rem -= chunk;
+        byte_off += chunk_bytes;
+    }
+
+    Ok(())
+}
+
+/// Read `count` 512-byte sectors starting at `lba` from the Hyper-V StorVSC SCSI disk.
+pub fn storvsc_read_sectors(lba: u64, count: u16, out_buf: &mut [u8]) -> Result<(), &'static str> {
+    unsafe { storvsc_transfer(lba, count, false, Some(out_buf), None) }
+}
+
+/// Write `count` 512-byte sectors starting at `lba` to the Hyper-V StorVSC SCSI disk.
+pub fn storvsc_write_sectors(lba: u64, count: u16, in_buf: &[u8]) -> Result<(), &'static str> {
+    unsafe { storvsc_transfer(lba, count, true, None, Some(in_buf)) }
+}
+
 /// Called from `idt.rs` when Hyper-V SynIC delivers Vector 48 (`SINT2`).
 #[inline(always)]
 pub fn on_synic_interrupt() {
@@ -1084,6 +1609,7 @@ pub fn init(
                 let mut if_guid = [0u8; 16];
                 if_guid.copy_from_slice(&resp[8..24]);
                 let flags = u16::from_le_bytes([resp[56], resp[57]]);
+                let subchannel_index = u16::from_le_bytes([resp[180], resp[181]]);
                 let channel_id = u32::from_le_bytes([resp[184], resp[185], resp[186], resp[187]]);
                 let raw_conn_id =
                     u32::from_le_bytes([resp[192], resp[193], resp[194], resp[195]]);
@@ -1105,30 +1631,45 @@ pub fn init(
                     st.keyboard_ch.is_pipe = is_pipe;
                     st.keyboard_ch.channel_id = channel_id;
                     st.keyboard_ch.connection_id = connection_id;
+                } else if if_guid == GUID_SCSI_STORVSC
+                    && !st.storvsc_ch.offered
+                    && subchannel_index == 0
+                {
+                    st.storvsc_ch.offered = true;
+                    st.storvsc_ch.is_pipe = false;
+                    st.storvsc_ch.channel_id = channel_id;
+                    st.storvsc_ch.connection_id = connection_id;
                 }
             }
         }
 
         crate::kprintln!(
-            "[CELEBRON-HV] Discovered {} VMBus offers (Shutdown={}, Heartbeat={}, SynthKbd={})",
+            "[CELEBRON-HV] Discovered {} VMBus offers (Shutdown={}, Heartbeat={}, SynthKbd={}, StorVSC={})",
             st.total_offers,
             st.shutdown_ch.offered,
             st.heartbeat_ch.offered,
-            st.keyboard_ch.offered
+            st.keyboard_ch.offered,
+            st.storvsc_ch.offered
         );
 
-        // 7. Open Shutdown IC, Heartbeat IC, and Synthetic Keyboard channels
+        // 7. Open Shutdown IC, Heartbeat IC, Synthetic Keyboard & StorVSC SCSI channels
         let mut shutdown_ch = st.shutdown_ch;
         let mut heartbeat_ch = st.heartbeat_ch;
         let mut keyboard_ch = st.keyboard_ch;
+        let mut storvsc_ch = st.storvsc_ch;
 
         open_vmbus_channel(0, &mut shutdown_ch, pmm, vmm, "Shutdown-IC");
         open_vmbus_channel(1, &mut heartbeat_ch, pmm, vmm, "Heartbeat-IC");
         open_vmbus_channel(2, &mut keyboard_ch, pmm, vmm, "Synth-Keyboard");
+        open_vmbus_channel(3, &mut storvsc_ch, pmm, vmm, "StorVSC-SCSI");
 
         st.shutdown_ch = shutdown_ch;
         st.heartbeat_ch = heartbeat_ch;
         st.keyboard_ch = keyboard_ch;
+        st.storvsc_ch = storvsc_ch;
+        if st.storvsc_ch.open {
+            st.stor_dma_page = pmm.alloc_frame().unwrap_or(0);
+        }
 
         // 8. Initiate Synthetic Keyboard Protocol Handshake (Guest -> Host)
         if st.keyboard_ch.open {
@@ -1153,6 +1694,11 @@ pub fn init(
             core::hint::spin_loop();
         }
 
+        // 10. Complete StorVSC SCSI initialization handshake & probe LUN 0..4
+        if st.storvsc_ch.open && st.stor_dma_page != 0 {
+            st.stor_disk = storvsc_handshake_and_probe();
+        }
+
         HyperVStatus {
             vmbus_online: true,
             vmbus_version: st.negotiated_version,
@@ -1160,6 +1706,7 @@ pub fn init(
             shutdown_ic_ready: st.shutdown_ch.negotiated || st.shutdown_ch.open,
             heartbeat_ic_ready: st.heartbeat_ch.negotiated || st.heartbeat_ch.open,
             synth_kbd_ready: st.keyboard_ch.negotiated || st.keyboard_ch.open,
+            storvsc_disk: st.stor_disk,
         }
     }
 }

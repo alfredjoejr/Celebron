@@ -18,6 +18,7 @@ mod power;
 mod scheduler;
 mod serial;
 mod smp;
+mod storage;
 mod syscall;
 mod userspace;
 mod vmm;
@@ -38,6 +39,7 @@ use pmm::PmmStats;
 use power::{PowerAction, PowerCapabilities};
 use scheduler::SchedulerStats;
 use smp::SmpInfo;
+use storage::StorageInfo;
 use vmm::VirtualMemoryManager;
 
 struct DashboardLiveCoords {
@@ -64,6 +66,7 @@ fn render_boot_dashboard(
     pcie_info: &PcieEnumerationResult,
     power_caps: &PowerCapabilities,
     hv_status: &HyperVStatus,
+    storage_info: &StorageInfo,
     initial_ticks: u64,
 ) -> Option<DashboardLiveCoords> {
     if boot_info.has_framebuffer == 0 {
@@ -99,12 +102,12 @@ fn render_boot_dashboard(
     );
 
     // 3. Telemetry panel
-    let body_h = fb.height.saturating_sub(172).min(576);
+    let body_h = fb.height.saturating_sub(170).min(584);
     canvas.fill_rect(40, 152, card_w, body_h, panel_bg);
     canvas.fill_rect(40, 152, 8, body_h, status_green);
 
-    let mut y = 164;
-    let line_step = 24;
+    let mut y = 160;
+    let line_step = 22;
 
     // Row 1: BootInfo ABI & Signature
     let mut x = canvas.draw_str(68, y, "[OK] UEFI BOOTLOADER: ABI V", status_green, 1);
@@ -306,14 +309,50 @@ fn render_boot_dashboard(
             1,
         );
     }
-    y += line_step + 10;
+    y += line_step;
 
-    // Row 16: Active milestone status
+    // Row 16: Persistent Block Storage & CelebronFS Partition
+    if storage_info.disk_online {
+        let disk_mib =
+            (storage_info.total_sectors * (storage_info.sector_size as u64)) / (1024 * 1024);
+        x = canvas.draw_str(68, y, "[OK] STORVSC/GPT: ", status_green, 1);
+        x = canvas.draw_u64_dec(x, y, disk_mib, text_white, 1);
+        x = canvas.draw_str(x, y, " MIB | ", text_muted, 1);
+        x = canvas.draw_u64_dec(x, y, storage_info.partition_count as u64, text_white, 1);
+        x = canvas.draw_str(x, y, " PART | CFS LBA ", text_muted, 1);
+        x = canvas.draw_u64_dec(x, y, storage_info.cfs_start_lba, accent_cyan, 1);
+        x = canvas.draw_str(x, y, " (MOUNTS: ", text_muted, 1);
+        x = canvas.draw_u64_dec(x, y, storage_info.cfs_mount_count, text_white, 1);
+        x = canvas.draw_str(x, y, " RW=", text_muted, 1);
+        x = canvas.draw_str(
+            x,
+            y,
+            if storage_info.cfs_write_verified {
+                "OK"
+            } else {
+                "NO"
+            },
+            accent_cyan,
+            1,
+        );
+        canvas.draw_str(x, y, ")", text_muted, 1);
+    } else {
+        canvas.draw_str(
+            68,
+            y,
+            "[OK] STORVSC/GPT: STANDBY (NO STORVSC DISK DETECTED)",
+            text_muted,
+            1,
+        );
+    }
+    y += line_step + 8;
+
+    // Row 17: Active milestone status
     coords.status_y = y;
     canvas.draw_str(
         68,
         y,
-        "STATUS: MILESTONE 1.6 ONLINE - PHASE 1 COMPLETE (VMBUS & POWER READY)",
+        "STATUS: PHASE 2 (M2.1) ONLINE - PERSISTENT BLOCK STORAGE & GPT ACTIVE",
         accent_cyan,
         1,
     );
@@ -661,20 +700,37 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 14. Mask 8259 PIC, start Local APIC periodic timer (Vec 32)
     let apic_info = interrupts::init_apic_and_timer();
 
-    // 15. Bring up Hyper-V SynIC, VMBus, Shutdown IC, Heartbeat IC & Synthetic Keyboard (if on Hyper-V)
+    // 15. Bring up Hyper-V SynIC, VMBus, Shutdown IC, Heartbeat IC, SynthKbd & StorVSC (if on Hyper-V)
     let hv_status = hyperv::init(pcie_info.is_hyperv, &mut pmm, &mut vmm);
     kprintln!(
-        "[CELEBRON-HV] VMBus online={} (v{}.{}, {} offers | Shutdown={} Heartbeat={} SynthKbd={})",
+        "[CELEBRON-HV] VMBus online={} (v{}.{}, {} offers | Shutdown={} Heartbeat={} SynthKbd={} StorVSC={})",
         hv_status.vmbus_online,
         hv_status.vmbus_version >> 16,
         hv_status.vmbus_version & 0xFFFF,
         hv_status.offers_discovered,
         hv_status.shutdown_ic_ready,
         hv_status.heartbeat_ic_ready,
-        hv_status.synth_kbd_ready
+        hv_status.synth_kbd_ready,
+        hv_status.storvsc_disk.online
     );
 
-    // 16. Enable hardware interrupts (`sti`) and verify live timer ticks
+    // 16. Initialize Block Storage Layer, validate GPT & CelebronFS volume header + mount persistence
+    let storage_info = storage::init(&hv_status);
+    if storage_info.cfs_found {
+        syscall::grant_block_capability(storage_info.cfs_sectors);
+    }
+    kprintln!(
+        "[CELEBRON-STOR] online={} gpt_valid={} parts={} cfs_found={} cfs_hdr={} mounts={} rw_ok={}",
+        storage_info.disk_online,
+        storage_info.gpt_valid,
+        storage_info.partition_count,
+        storage_info.cfs_found,
+        storage_info.cfs_header_valid,
+        storage_info.cfs_mount_count,
+        storage_info.cfs_write_verified
+    );
+
+    // 17. Enable hardware interrupts (`sti`) and verify live timer ticks
     let initial_ticks = interrupts::enable_interrupts_and_verify_timer();
     let initial_sched_stats = scheduler::stats();
     let initial_syscall_stats = syscall::stats();
@@ -714,9 +770,10 @@ pub extern "sysv64" fn kernel_main(boot_info: &'static BootInfo) -> ! {
         &pcie_info,
         &power_caps,
         &hv_status,
+        &storage_info,
         initial_ticks,
     );
-    kprintln!("[CELEBRON-KERNEL] Milestone 1.6 Online (Phase 1 Complete — VMBus & Power Ready).");
+    kprintln!("[CELEBRON-KERNEL] Milestone 2.1 Online (Persistent Block Storage, GPT & CelebronFS Active).");
     kprintln!("[CELEBRON-POWER] Ready for signals: Hyper-V Shut Down | [S] Shutdown | [R] Reboot | [W] Warm");
 
     let mut last_rendered_ticks = initial_ticks;

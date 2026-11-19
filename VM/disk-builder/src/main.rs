@@ -7,12 +7,16 @@ use std::fs;
 use std::path::PathBuf;
 
 const SECTOR_SIZE: usize = 512;
-const DISK_SIZE_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
-const TOTAL_SECTORS: u64 = (DISK_SIZE_BYTES / SECTOR_SIZE) as u64; // 131,072 sectors
+const DISK_SIZE_BYTES: usize = 96 * 1024 * 1024; // 96 MiB
+const TOTAL_SECTORS: u64 = (DISK_SIZE_BYTES / SECTOR_SIZE) as u64; // 196,608 sectors
 
 const ESP_START_LBA: u64 = 2048;
 const ESP_END_LBA: u64 = 130_047;
 const ESP_SECTORS: u32 = (ESP_END_LBA - ESP_START_LBA + 1) as u32; // 128,000 sectors
+
+const CFS_START_LBA: u64 = 131_072;
+const CFS_END_LBA: u64 = TOTAL_SECTORS - 34; // 196,574
+const CFS_SECTORS: u64 = CFS_END_LBA - CFS_START_LBA + 1; // 65,503 sectors
 
 const FAT_RESERVED_SECTORS: u32 = 32;
 const FAT_COUNT: u32 = 2;
@@ -96,6 +100,28 @@ fn write_gpt(disk: &mut [u8]) {
     for (i, ch) in name.encode_utf16().enumerate() {
         let off = 56 + i * 2;
         entries[off..off + 2].copy_from_slice(&ch.to_le_bytes());
+    }
+
+    // Entry 1: CelebronFS CoW Root (Type GUID: CE1EB201-F500-4C4F-A100-CE1EB2012026)
+    let cfs_type_guid: [u8; 16] = [
+        0x01, 0xB2, 0x1E, 0xCE, 0x00, 0xF5, 0x4F, 0x4C,
+        0xA1, 0x00, 0xCE, 0x1E, 0xB2, 0x01, 0x20, 0x26,
+    ];
+    let cfs_unique_guid: [u8; 16] = [
+        0xCE, 0x1E, 0xB2, 0x01, 0xF5, 0x01, 0x4C, 0x4F,
+        0x9A, 0xBC, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60,
+    ];
+    let e1 = &mut entries[128..256];
+    e1[0..16].copy_from_slice(&cfs_type_guid);
+    e1[16..32].copy_from_slice(&cfs_unique_guid);
+    e1[32..40].copy_from_slice(&CFS_START_LBA.to_le_bytes());
+    e1[40..48].copy_from_slice(&CFS_END_LBA.to_le_bytes());
+    e1[48..56].copy_from_slice(&0u64.to_le_bytes()); // Attributes
+
+    let cfs_name = "CelebronFS CoW Root";
+    for (i, ch) in cfs_name.encode_utf16().enumerate() {
+        let off = 56 + i * 2;
+        e1[off..off + 2].copy_from_slice(&ch.to_le_bytes());
     }
 
     let entries_crc = crc32_ieee(&entries);
@@ -347,8 +373,8 @@ fn build_vhd_footer(disk_size: u64) -> [u8; SECTOR_SIZE] {
     footer[40..48].copy_from_slice(&disk_size.to_be_bytes()); // Original size
     footer[48..56].copy_from_slice(&disk_size.to_be_bytes()); // Current size
 
-    // Disk Geometry (CHS for 64 MiB: 130 cylinders, 16 heads, 63 sectors/track)
-    let cylinders: u16 = 130;
+    // Disk Geometry (CHS for 96 MiB: 195 cylinders, 16 heads, 63 sectors/track)
+    let cylinders: u16 = 195;
     footer[56..58].copy_from_slice(&cylinders.to_be_bytes());
     footer[58] = 16;
     footer[59] = 63;
@@ -449,12 +475,15 @@ fn build_vhdx_image(raw_disk: &[u8]) -> Vec<u8> {
     vhdx[0x40000..0x50000].copy_from_slice(&reg);
 
     // 3. Block Allocation Table (BAT) at 2 MiB (`0x200000`)
-    // Two 32 MiB payload blocks (64 MiB total): state = 6 (PAYLOAD_BLOCK_FULLY_PRESENT)
+    // 32 MiB payload blocks: state = 6 (PAYLOAD_BLOCK_FULLY_PRESENT)
     let bat_offset = 2 * MB;
-    let bat_entry_0: u64 = ((4u64) << 20) | 6; // Payload block 0 at 4 MiB
-    let bat_entry_1: u64 = ((36u64) << 20) | 6; // Payload block 1 at 36 MiB
-    vhdx[bat_offset..bat_offset + 8].copy_from_slice(&bat_entry_0.to_le_bytes());
-    vhdx[bat_offset + 8..bat_offset + 16].copy_from_slice(&bat_entry_1.to_le_bytes());
+    let num_blocks = raw_disk.len() / (BLOCK_SIZE as usize);
+    for blk in 0..num_blocks {
+        let file_offset_mb = 4u64 + (blk as u64) * 32;
+        let bat_entry: u64 = (file_offset_mb << 20) | 6;
+        let off = bat_offset + blk * 8;
+        vhdx[off..off + 8].copy_from_slice(&bat_entry.to_le_bytes());
+    }
 
     // 4. Metadata Region at 3 MiB (`0x300000`)
     let meta_base = 3 * MB;
@@ -522,7 +551,7 @@ fn build_vhdx_image(raw_disk: &[u8]) -> Vec<u8> {
     // 1. File Parameters (BlockSize = 32 MiB, LeaveBlocksAllocated = 1)
     vhdx[val_base..val_base + 4].copy_from_slice(&BLOCK_SIZE.to_le_bytes());
     vhdx[val_base + 4..val_base + 8].copy_from_slice(&1u32.to_le_bytes());
-    // 2. Virtual Disk Size (64 MiB)
+    // 2. Virtual Disk Size (96 MiB)
     vhdx[val_base + 8..val_base + 16].copy_from_slice(&(DISK_SIZE_BYTES as u64).to_le_bytes());
     // 3. Virtual Disk ID
     vhdx[val_base + 16..val_base + 32].copy_from_slice(&[
@@ -538,6 +567,23 @@ fn build_vhdx_image(raw_disk: &[u8]) -> Vec<u8> {
     vhdx[PAYLOAD_OFFSET..PAYLOAD_OFFSET + raw_disk.len()].copy_from_slice(raw_disk);
 
     vhdx
+}
+
+/// Write the initial 68-byte CelebronFS Volume Header into Sector 0 of Partition 1 (`CFS_START_LBA`).
+fn write_celebronfs_header(disk: &mut [u8]) {
+    let off = (CFS_START_LBA as usize) * SECTOR_SIZE;
+    let hdr = &mut disk[off..off + SECTOR_SIZE];
+    hdr.fill(0);
+    hdr[0..16].copy_from_slice(b"CELEBRONFS_V1\0\0\0");
+    hdr[16..20].copy_from_slice(&1u32.to_le_bytes()); // version = 1
+    hdr[20..24].copy_from_slice(&4096u32.to_le_bytes()); // block_size = 4096
+    hdr[24..32].copy_from_slice(&CFS_START_LBA.to_le_bytes());
+    hdr[32..40].copy_from_slice(&CFS_SECTORS.to_le_bytes());
+    hdr[40..48].copy_from_slice(&(CFS_SECTORS / 8).to_le_bytes()); // total_blocks (4 KiB)
+    hdr[48..56].copy_from_slice(&0u64.to_le_bytes()); // mount_count = 0
+    hdr[56..64].copy_from_slice(&1u64.to_le_bytes()); // generation = 1
+    let crc = crc32_ieee(&hdr[0..64]);
+    hdr[64..68].copy_from_slice(&crc.to_le_bytes());
 }
 
 fn main() {
@@ -569,6 +615,7 @@ fn main() {
     write_protective_mbr(&mut raw_disk);
     write_gpt(&mut raw_disk);
     write_fat32_esp(&mut raw_disk, &bootloader_bytes, &kernel_bytes);
+    write_celebronfs_header(&mut raw_disk);
 
     fs::create_dir_all(&out_dir).expect("Failed to create VM output directory");
 

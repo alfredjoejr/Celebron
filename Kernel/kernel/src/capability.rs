@@ -19,6 +19,7 @@ pub enum CapType {
     DeviceMmio = 5,
     DmaBuffer = 6,
     Irq = 7,
+    BlockDevice = 8,
 }
 
 #[allow(dead_code)]
@@ -181,6 +182,7 @@ pub const CAP_SYS_POWER: u32 = 5;
 pub const CAP_DRV_MMIO: u32 = 6;
 pub const CAP_DRV_DMA: u32 = 7;
 pub const CAP_DRV_IRQ: u32 = 8;
+pub const CAP_BLK_DEV: u32 = 9;
 
 #[allow(dead_code)]
 static CAP_OPERATIONS_COUNT: AtomicU64 = AtomicU64::new(0);
