@@ -1,7 +1,7 @@
 # Celebron OS
 
 > **Proprietary & Confidential — All Rights Reserved.**  
-> Celebron OS is an independent, proprietary 64-bit AI-native operating system built on a custom Rust capability-based pure microkernel and custom UEFI bootloader.
+> Celebron OS is an independent, experimental 64-bit AI-native operating system and microkernel built in Rust. Capability-based pure microkernel and custom UEFI bootloader.
 
 ---
 
